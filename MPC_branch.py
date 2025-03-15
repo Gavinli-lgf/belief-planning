@@ -1586,12 +1586,13 @@ class robustMPC():
         else:
             self.feasible = 0
         self.Solution = res.x
+
 class BranchMPC_CVaR():
     """Model Predicitve Controller class using CVaR objective
     """
     def __init__(self,  mpcParameters, predictiveModel,ralpha,S=None):
         """Initialization
-        Arguments:
+        Arguments:(初始化参数)
             mpcParameters: struct containing MPC parameters
         """
         self.N      = mpcParameters.N
@@ -1642,8 +1643,6 @@ class BranchMPC_CVaR():
         self.branchidx = {}
         self.branchdim = 0
 
-
-
         self.xPred = None
         self.uPred = None
         self.xLin = None
@@ -1656,6 +1655,8 @@ class BranchMPC_CVaR():
         self.solverTime = deltaTimer
         self.linearizationTime = deltaTimer
         self.timeStep = 0
+
+    # 初始化场景树(scenario tree)
     def inittree(self,x,z):
         u = np.zeros(self.d)
         self.BT = BranchTree(np.reshape(x,[1,self.n]),np.reshape(z,[1,self.n]),np.reshape(u,[1,self.d]),1,0)
@@ -1673,7 +1674,6 @@ class BranchMPC_CVaR():
         self.BT.dynmatr[0] = (A,B,C)
         countx+=self.BT.xtraj.shape[0]
         countu+=self.BT.xtraj.shape[0]
-
 
         while len(q)>0:
             currentbranch = q.pop(0)
@@ -1714,7 +1714,7 @@ class BranchMPC_CVaR():
         self.slackweight = np.zeros(self.totalx*(self.Fx.shape[0]+1))
         self.branchdim = countbranch
 
-
+    # 构建等式约束
     def buildEqConstr(self):
         # Buil matrices for optimization (Convention from Chapter 15.2 Borrelli, Bemporad and Morari MPC book)
         # The equality constraint is: G*z = E * x(t) + L

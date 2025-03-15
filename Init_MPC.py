@@ -32,6 +32,7 @@ def initMPCParams(nx, d, N, M, m, ydes,vdes,am,rm,N_lane,W):
 
     mpcParameters    = MPCParams(n=nx+M*m, d=d, N=N, Q=Q, R=R, Fx=Fx, bx=bx, Fu=Fu, bu=bu, xRef=xRef, slacks=True, Qslack=Qslack, timeVarying = True)
     return mpcParameters
+
 def initBranchMPC(n,d,N,NB,xRef,am,rm,N_lane,W):
     Fx = np.array([[0., 1., 0., 0.],
                    [0., -1., 0., 0.],
@@ -57,6 +58,7 @@ def initBranchMPC(n,d,N,NB,xRef,am,rm,N_lane,W):
 
     mpcParameters    = BranchMPCParams(n=n, d=d, N=N, NB = NB, Q=Q, R=R, Fx=Fx, bx=bx, Fu=Fu, bu=bu, xRef=xRef, slacks=True, Qslack=Qslack, timeVarying = True)
     return mpcParameters
+
 def initquadBranchMPC(n,d,N,NB,xRef,vxm,vym,rm):
     Fx = np.empty([0,n])
 

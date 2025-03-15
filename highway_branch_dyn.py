@@ -113,6 +113,7 @@ def backup_lc(x,x0):
         return u
     else:
         return np.array([-0.8558*(x[2]-x0[2]),-0.3162*(x[1]-x0[1])-3.9889*(x[3]-x0[3])])
+
 def softmin(x,gamma=1):
     if isinstance(x,casadi.SX) or isinstance(x,casadi.MX):
         return sum1(exp(-gamma*x)*x)/sum1(exp(-gamma*x))
@@ -290,6 +291,7 @@ class PredictiveModel():
         self.psym = Function('p',[x,z],[p])
         self.dpsym = Function('dp',[x,z],[jacobian(p,x)])
         self.u0sym = Function('u0',[x],[self.backupcons[0](x)])
+
 class PredictiveModel_merge():
     def __init__(self, n, d, N, backupcons, dt, cons, merge_ref, laneID = 0, N_lane1 = 3, N_lane2 = 2):
         '''

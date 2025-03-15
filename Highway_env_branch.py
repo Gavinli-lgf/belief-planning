@@ -22,7 +22,6 @@ lane_width = 3.6
 lm = np.arange(0,7)*lane_width
 
 
-
 def with_probability(P=1):
     return np.random.uniform() <= P
 
@@ -42,26 +41,29 @@ class vehicle():
         self.state = self.state + dxdt*self.dt
 
 
+"""该类是一个高速公路多车辆协同控制仿真环境,用于sim_overtake
+"""
 class Highway_env():
     def __init__(self,NV,mpc,N_lane=6):
         '''
-        Input: NV: number of vehicles
-               mpc: mpc controller for the controlled vehicle
+        Input: NV: number of vehicles(所有车辆数量)
+               mpc: mpc controller for the controlled vehicle(ego agent的控制器)
                N_lane: number of lanes
         '''
-        self.dt = mpc.predictiveModel.dt
-        self.veh_set = []
-        self.NV = NV
+        self.dt = mpc.predictiveModel.dt    # 仿真步长(与mpc步长一致)
+        self.veh_set = []   # 所有车辆对象的集合
+        self.NV = NV        # 所有车辆数量
         self.N_lane = N_lane
-        self.desired_x = [None]*NV
+        self.desired_x = [None]*NV  # 所有车辆期望状态:其中l坐标是veh[i]所在车道中心线的l坐标(如果veh[i]刚进入这个车道,但l坐标还为到达这里，那么这个坐标就是个期望(desire))
         self.mpc = mpc
         self.predictiveModel = mpc.predictiveModel
         self.backupcons = mpc.predictiveModel.backupcons
 
         self.m = len(self.backupcons)
         self.cons = mpc.predictiveModel.cons
-        self.LB = [self.cons.W/2,N_lane*3.6-self.cons.W/2]
+        self.LB = [self.cons.W/2, N_lane*3.6-self.cons.W/2]
 
+        # 初始化所有车辆状态(s,l,v,ψ)(2辆车,生成 x0 为 2*4 的矩阵. ego为第0行，obs为第2行)
         x0 = np.array([[0,1.8,v0,0],[5,5.4,v0,0]])
         # x0 = np.array([[-8,1.8,v0,0],[5,5.4,v0,0]])
         for i in range(0,self.NV):
@@ -69,82 +71,106 @@ class Highway_env():
             self.desired_x[i] = np.array([0,  x0[i,1],v0,0])
 
 
-
+    """
+    开始
+    ├─ 初始化控制容器
+    ├─ 遍历所有车辆
+    │   ├─ 生成预测轨迹
+    │   ├─ 计算新车道索引
+    │   └─ 条件更新车道属性
+    ├─ 非控车辆随机变道
+    ├─ 安全策略评估
+    ├─ MPC求解最优控制
+    └─ 状态更新
+    结束
+    """
     def step(self,t_):
         # initialize the trajectories to be propagated forward under the backup policy
-        u_set  = [None]*self.NV
-        xx_set = [None]*self.NV
-        u0_set = [None]*self.NV
-        x_set  = [None]*self.NV
+        u_set  = [None]*self.NV # 控制指令集合（所有车辆）
+        xx_set = [None]*self.NV # 预测轨迹集合
+        u0_set = [None]*self.NV # 备用控制策略集合
+        x_set  = [None]*self.NV # 车辆状态集合
 
-        umax = np.array([self.cons.am,self.cons.rm])
+        umax = np.array([self.cons.am, self.cons.rm])
         # generate backup trajectories
         self.xbackup = np.empty([0,(self.mpc.N+1)*4])
         for i in range(0,self.NV):
             z = self.veh_set[i].state
-            xx_set[i] = self.predictiveModel.zpred_eval(z)
-            newlaneidx = round((z[1]-1.8)/3.6)
+            xx_set[i] = self.predictiveModel.zpred_eval(z)  # 调用预测模型生成轨迹
+            newlaneidx = round((z[1]-1.8)/3.6)  # 计算 veh[i] 当前所在车道序号（3.6是车道宽度,1.8是车道宽度的一半）
 
+            # 触发车道更新条件（"初始时刻"或"veh[i]的车道序号发生变化,且横向位置与新车道边界偏移<1.4m"）
             if t_==0 or (newlaneidx !=self.veh_set[i].laneidx and abs(z[1]-1.8-3.6*newlaneidx)<1.4):
                 # update the desired lane
-                self.veh_set[i].laneidx = newlaneidx
-                self.desired_x[i][1] = 1.8+newlaneidx*3.6
+                self.veh_set[i].laneidx = newlaneidx        # 更新车道序号
+                self.desired_x[i][1] = 1.8+newlaneidx*3.6   # 设置新车道中心线l坐标
+                # 针对obs(i=1)的特殊处理
                 if i==1:
+                    # 根据 ego 的 laneidx 动态调整 xRef (通过xRef动态调整参考路径，实现柔性变道)
                     if self.veh_set[0].laneidx<self.veh_set[1].laneidx:
-                        xRef = np.array([0,1.8+3.6*(self.veh_set[1].laneidx-1),v0,0])
+                        xRef = np.array([0, 1.8+3.6*(self.veh_set[1].laneidx-1), v0, 0])
                     elif self.veh_set[0].laneidx>self.veh_set[1].laneidx:
-                        xRef = np.array([0,1.8+3.6*(self.veh_set[1].laneidx+1),v0,0])
+                        xRef = np.array([0, 1.8+3.6*(self.veh_set[1].laneidx+1), v0, 0])
                     else:
                         if self.veh_set[1].laneidx>0:
-                            xRef = np.array([0,1.8+3.6*(self.veh_set[1].laneidx-1),v0,0])
+                            xRef = np.array([0, 1.8+3.6*(self.veh_set[1].laneidx-1), v0, 0])
                         else:
-                            xRef = np.array([0,1.8+3.6*(self.veh_set[1].laneidx+1),v0,0])
-                    backupcons = [lambda x:backup_maintain(x,self.cons),lambda x:backup_brake(x,self.cons),lambda x:backup_lc(x,xRef)]
+                            xRef = np.array([0, 1.8+3.6*(self.veh_set[1].laneidx+1), v0, 0])
+
+                    # # 更新备用策略（包含三种：保持maintain、刹车brake、变道lc）
+                    backupcons = [lambda x:backup_maintain(x,self.cons), lambda x:backup_brake(x,self.cons), lambda x:backup_lc(x,xRef)]
                     self.predictiveModel.update_backup(backupcons)
+
+            # obs(i!=0),每10步(t_%10==0)更新一次 (使用 with_probability() 实现obs的随机变道决策)
             if t_%10==0 and i!=0:
-                # update the desired lane for the uncontrolled vehicle
+                # update the desired lane for the uncontrolled vehicle(obs有50%概率触发变道)
                 if with_probability(0.5):
-                    if self.veh_set[i].laneidx==0:
+                    if self.veh_set[i].laneidx==0:  # obs在最左侧车道0,就换到车道1(1.8+3.6=5.4)
                         self.desired_x[i][1] = 5.4
-                    elif self.veh_set[i].laneidx==self.N_lane-1:
+                    elif self.veh_set[i].laneidx==self.N_lane-1:    # obs在最右侧车道(序号N_lane-1),就换到右侧第2车道(N_lane-2)
                         self.desired_x[i][1] = 1.8+(self.N_lane-2)*3.6
                     else:
+                        # obs在中间车道(非最左/右侧),就50%概率随机选择向左/右车道
                         if with_probability(0.5):
-                            self.desired_x[i][1] = 1.8+(self.veh_set[i].laneidx-1)*3.6
+                            self.desired_x[i][1] = 1.8+(self.veh_set[i].laneidx-1)*3.6  # 向左变道
                         else:
-                            self.desired_x[i][1] = 1.8+(self.veh_set[i].laneidx+1)*3.6
+                            self.desired_x[i][1] = 1.8+(self.veh_set[i].laneidx+1)*3.6  # 向右变道
 
         idx0 = self.veh_set[0].backupidx
         n = self.predictiveModel.n
-        x1 = xx_set[0][:,idx0*n:(idx0+1)*n]
-        for i in range(0,self.NV):
-            if i!=0:
+        x1 = xx_set[0][:, idx0*n:(idx0+1)*n]
+        for i in range(0, self.NV):
+            if i!=0:    # 对其他 obs 车辆的每个 backupcons 进行安全评估
                 hi = np.zeros(self.m)
-                for j in range(0,self.m):
-                    hi[j] = min(np.append(veh_col(x1,xx_set[i][:,j*n:(j+1)*n],[self.cons.L+1,self.cons.W+0.2]),lane_bdry_h(x1,self.LB[0],self.LB[1])))
-                self.veh_set[i].backupidx = np.argmax(hi)
+                for j in range(0, self.m):
+                    # 计算安全指数（碰撞检测 + 车道边界约束）
+                    hi[j] = min(np.append(veh_col(x1, xx_set[i][:,j*n:(j+1)*n], [self.cons.L+1,self.cons.W+0.2]), lane_bdry_h(x1,self.LB[0],self.LB[1])))
+                self.veh_set[i].backupidx = np.argmax(hi)   # 选择最安全的备用策略索引
 
+            # 应用备用策略生成控制指令
             u0_set[i]=self.backupcons[self.veh_set[i].backupidx](self.veh_set[i].state)
 
 
-        # set x_ref for the overtaking maneuver and call the MPC
-
-        if self.veh_set[0].state[0]<self.veh_set[1].state[0]:
-            Ydes = 1.8+self.veh_set[0].laneidx*3.6
-        else:
+        # set x_ref for the overtaking maneuver and call the MPC(根据ego与obs的相对位置关系，设置xRef,并求解mpc.)
+        # 根据 ego 与 obs 的纵向相对位置,设置 ego 的期望l坐标 Ydes
+        if self.veh_set[0].state[0]<self.veh_set[1].state[0]:   # ego 车辆在 obs 车辆前面
+            Ydes = 1.8+self.veh_set[0].laneidx*3.6  # 计算 ego 所在车道中心线的 l 坐标(也是期望l坐标)
+        else:   # ego 在 obs 前面时,ego的期望l坐标就是obs当前所处车道的中心线的l坐标
             Ydes = self.veh_set[1].state[1]
+
+        # 根据 ego 是否已经正常对 obs 完成overtake,设置 ego 的期望速度 vdes   
         if abs(self.veh_set[0].state[1]-Ydes)<1 and self.veh_set[0].state[0]>self.veh_set[1].state[0]+3:
             vdes = v0
         else:
-            vdes = self.veh_set[1].state[2]+1*(self.veh_set[1].state[0]+1.5-self.veh_set[0].state[0])
+            vdes = self.veh_set[1].state[2] + 1*(self.veh_set[1].state[0]+1.5-self.veh_set[0].state[0])
 
         # Ydes = 1.8+self.veh_set[0].laneidx*3.6
         # vdes = self.veh_set[1].state[2]+5
         xRef = np.array([0,Ydes,vdes,0])
-        self.mpc.solve(self.veh_set[0].state,self.veh_set[1].state,xRef)
+        self.mpc.solve(self.veh_set[0].state, self.veh_set[1].state, xRef)
 
         u_set[0] = self.mpc.uPred[0]
-        xPred,zPred,uPred,branch_w = self.mpc.BT2array()
+        xPred, zPred, uPred, branch_w = self.mpc.BT2array()
         self.veh_set[0].step(u_set[0])
         x_set[0] = self.veh_set[0].state
         # if t_==50:
@@ -157,8 +183,7 @@ class Highway_env():
             self.veh_set[i].step(u_set[i])
             x_set[i] = self.veh_set[i].state
 
-
-        return u_set,x_set,xx_set,xPred,zPred, branch_w
+        return u_set, x_set, xx_set, xPred,zPred, branch_w
 
     def replace_veh(self,idx,dir = 2):
         if idx==0:
@@ -200,6 +225,7 @@ class Highway_env():
                 return False
         self.veh_set[idx] = vehicle([X,Y,self.veh_set[0].state[2],0],dt=self.dt,backupidx = 0,laneidx = laneidx)
         return True
+
 def merge_geometry(N_lane,merge_lane,merge_s,merge_R, merge_side=0):
     '''
     generate the merging geometry
@@ -218,7 +244,6 @@ def merge_geometry(N_lane,merge_lane,merge_s,merge_R, merge_side=0):
     else:
         merge_arc_center = np.array([merge_s+merge_R*np.sin(merge_theta),merge_lane*lane_width-merge_R])
         merge_lane_start = np.array([merge_s-merge_s*np.cos(merge_theta),-np.sin(merge_theta)*merge_s-lane_width*merge_lane])
-
 
 
     merge_lane_ref_s1 = np.linspace(0, merge_s, num=int(merge_s/0.5),endpoint = False) # straight portion
@@ -241,6 +266,10 @@ def merge_geometry(N_lane,merge_lane,merge_s,merge_R, merge_side=0):
 
     return merge_lane_ref_X1,merge_lane_ref_X2,merge_lane_ref_Y1,merge_lane_ref_Y2,merge_lane_ref_psi1,merge_lane_ref_psi2
 
+
+
+"""该类是一个高速公路多车辆协同控制仿真环境,用于sim_merge
+"""
 class Highway_env_merge():
     '''
     Similar object, for merging simulation
@@ -356,49 +385,54 @@ class Highway_env_merge():
 def Highway_sim(env,T):
     # simulate the scenario
     collision = False
-    dt = env.dt
+    dt = env.dt                           # 从 env 对象获取时间步长
     t=0
     Ts_update = 4
     N_update = int(round(Ts_update/dt))
-    N = int(round(T/dt))
-    state_rec = np.zeros([env.NV,N,4])
+    N = int(round(T/dt))                  # 总仿真步数
+    state_rec = np.zeros([env.NV, N, 4])  # 车辆状态记录 [车辆编号, 时间步, 状态向量]
     b_rec = [None]*N
-    backup_rec = [None]*env.NV
-    backup_choice_rec = [None]*env.NV
+    backup_rec = [None]*env.NV          # 各车辆的备份轨迹
+    backup_choice_rec = [None]*env.NV   # 备份策略选择索引
     xPred_rec = [None]*N
     zPred_rec = [None]*N
     branch_w_rec = [None]*N
     for i in range(0,env.NV):
         backup_rec[i]=[None]*N
         backup_choice_rec[i] = [None]*N
-    input_rec = np.zeros([env.NV,N,2])
+    input_rec = np.zeros([env.NV, N, 2])     # 控制输入记录 [车辆编号, 时间步, 控制向量]
     f0 = np.array([v0,0,0,0])
     for i in range(0,len(env.veh_set)):
         state_rec[i][t]=env.veh_set[i].state
 
+    # 主仿真循环(步长dt,总时间T,总仿真步数N)
     xx_set = []
     dis = 100
-    while t<N:
+    while t<N:  # t 是仿真步数
+        # 碰撞检测模块
         if not collision:
-            for i in range(0,env.NV):
-                for j in range(0,env.NV):
+            for i in range(0, env.NV):
+                for j in range(0, env.NV):
                     if i!=j:
+                        # 计算车辆间距（考虑车体尺寸）
                         dis = max(abs(env.veh_set[i].state[0]-env.veh_set[j].state[0])-0.5*(env.veh_set[i].v_length+env.veh_set[j].v_length),\
                         abs(env.veh_set[i].state[1]-env.veh_set[j].state[1])-0.5*(env.veh_set[i].v_width+env.veh_set[j].v_width))
-                if dis<0:
+                if dis<0:   # 发生碰撞
                     collision = True
 
         print("t=",t*env.dt)
 
+        # 调用 env 对象,计算第 t 步仿真结果
         u_set,x_set,xx_set,xPred,zPred,branch_w=env.step(t)
         xPred_rec[t]=xPred
         zPred_rec[t]=zPred
         branch_w_rec[t] = branch_w
-        for i in range(0,env.NV):
-            input_rec[i][t]=u_set[i]
-            state_rec[i][t]=x_set[i]
-            backup_rec[i][t]=xx_set[i]
-            backup_choice_rec[i][t] = env.veh_set[i].backupidx
+        # 记录关键数据
+        for i in range(0, env.NV):
+            input_rec[i][t]=u_set[i]    # 记录 t 步的控制指令
+            state_rec[i][t]=x_set[i]    # 记录 t 步的车辆状态
+            backup_rec[i][t]=xx_set[i]  # 记录 t 步的备份轨迹
+            backup_choice_rec[i][t] = env.veh_set[i].backupidx  # 记录策 t 步选择的策略索引
         t=t+1
     return state_rec,input_rec,backup_rec,backup_choice_rec,xPred_rec,zPred_rec,branch_w_rec,collision
 
@@ -527,40 +561,44 @@ def animate_scenario(env,state_rec,backup_rec,backup_choice_rec,xPred_rec,zPred_
     '''
     if output:
         matplotlib.use("Agg")
-    ego_idx = 0
+    ego_idx = 0  # ego agent 编号为0
+    # 根据环境类型设置画布尺寸
     plot_merge = isinstance(env,Highway_env_merge)
     if plot_merge:
-        fig = plt.figure(figsize=(10,8))
+        fig = plt.figure(figsize=(10,8))    # 合并场景需要更大画布
     else:
         fig = plt.figure(figsize=(10,4))
     ax = fig.add_subplot(111)
     plt.grid()
 
+    # 创建车辆矩形显示 veh_patch
     nframe = len(state_rec[0])
     ego_veh = env.veh_set[ego_idx]
     veh_patch = [None]*env.NV
-    for i in range(0,env.NV):
-        if i==ego_idx:
-            veh_patch[i]=plt.Rectangle((ego_veh.state[0]-ego_veh.v_length/2,ego_veh.state[1]-ego_veh.v_width/2), ego_veh.v_length,ego_veh.v_width, fc='r', zorder=0)
-        else:
-            veh_patch[i]=plt.Rectangle((ego_veh.state[0]-ego_veh.v_length/2,ego_veh.state[1]-ego_veh.v_width/2), ego_veh.v_length,ego_veh.v_width, fc='b', zorder=0)
+    for i in range(0, env.NV):
+        if i==ego_idx:  # ego agent 用红色表示'r'
+            veh_patch[i]=plt.Rectangle((ego_veh.state[0]-ego_veh.v_length/2, ego_veh.state[1]-ego_veh.v_width/2), ego_veh.v_length, ego_veh.v_width, fc='r', zorder=0)
+        else:           # 其它 obs 用蓝色表示'b'
+            veh_patch[i]=plt.Rectangle((ego_veh.state[0]-ego_veh.v_length/2, ego_veh.state[1]-ego_veh.v_width/2), ego_veh.v_length, ego_veh.v_width, fc='b', zorder=0)
 
     for patch in veh_patch:
         ax.add_patch(patch)
 
 
+    # animate 实现了每一帧的具体显示效果(可通过实际显示结果反推变量的含义)
     def animate(t,veh_patch,state_rec,backup_rec,backup_choice_rec,xPred_rec,zPred_rec,env,ego_idx=0):
+        # 根据场景类型动态调整视野范围
         plot_merge = isinstance(env,Highway_env_merge)
         N_veh = len(state_rec)
         ego_y = state_rec[ego_idx][t][1]
         ego_x = state_rec[ego_idx][t][0]
         ax.clear()
-        if plot_merge:
+        if plot_merge:      # 合并场景的固定视野
             xmin = ego_x-5
             xmax = ego_x+45
             ymin = -5
             ymax = 35
-        else:
+        else:               # 普通场景的跟随视野
             xmin = ego_x-10
             xmax = ego_x+40
             ymin = ego_y-10
@@ -580,15 +618,13 @@ def animate_scenario(env,state_rec,backup_rec,backup_choice_rec,xPred_rec,zPred_
             ax.add_patch(veh_patch[i])
             idx = backup_choice_rec[i][t]
 
-
-
-
-
+        # 绘制预测轨迹
         colorset = ['tab:blue','tab:orange','tab:green','tab:red','tab:purple','tab:brown','tab:pink','tab:gray','tab:olive','tab:cyan','y','m','c','g']
         for j in range(0,len(xPred_rec[t])):
             plt.plot(xPred_rec[t][j][:,0],-xPred_rec[t][j][:,1],'b--',linewidth = 1)
             for k in range(0,xPred_rec[t][j].shape[0]):
                 if k%2==1:
+                    # 用半透明色块 newpatch 表示预测位置
                     newpatch = plt.Rectangle((xPred_rec[t][j][k,0]-env.veh_set[ego_idx].v_length/2,-xPred_rec[t][j][k,1]-env.veh_set[ego_idx].v_width/2), env.veh_set[ego_idx].v_length,env.veh_set[ego_idx].v_width, fc=colorset[j],alpha=0.3, zorder=0)
                     coords = ts.transform([xPred_rec[t][j][k,0],-xPred_rec[t][j][k,1]])
                     tr = matplotlib.transforms.Affine2D().rotate_around(coords[0], coords[1], -xPred_rec[t][j][k,3])
@@ -634,6 +670,7 @@ def animate_scenario(env,state_rec,backup_rec,backup_choice_rec,xPred_rec,zPred_
             plt.plot([xmin-50, xmax+50],[-lm[env.N_lane], -lm[env.N_lane]], 'g', linewidth=2)
 
         return veh_patch
+
     anim = animation.FuncAnimation(fig, animate, fargs=(veh_patch,state_rec,backup_rec,backup_choice_rec,xPred_rec,zPred_rec,env,ego_idx,),
                                    frames=nframe,
                                    interval=50,
