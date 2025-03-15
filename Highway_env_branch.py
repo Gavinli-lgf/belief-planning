@@ -19,7 +19,7 @@ from highway_branch_dyn import *
 v0=20
 f0 = np.array([v0,0,0,0])
 lane_width = 3.6
-lm = np.arange(0,7)*lane_width
+lm = np.arange(0,7)*lane_width  # 用于用于生成车道
 
 
 def with_probability(P=1):
@@ -381,7 +381,15 @@ class Highway_env_merge():
 
         return u_set,x_set,xx_set,xPred,zPred,branch_w
 
-
+"""
+输出:(注: 运行结果图中y显示的是负数,但是代码中所有变量的y都是按正数记录的)
+    state_rec: 车辆状态记录 (共3个维度[车辆序号, 时间步, 状态向量列表])
+    input_rec: 控制输入记录 (共3个维度[车辆编号, 时间步, 控制向量列表])
+    backup_rec: 各车辆的备份轨迹 (共3个维度[车辆序号, 时间步, 状态向量列表])
+    backup_choice_rec: 各车辆的备份策略索引(共3个维度[车辆序号, 时间步, 策略索引列表]
+    xPred_rec: ego 的预测轨迹记录(共3个维度[时间步, 第几条预测线序号, 每条预测线上的状态序号, 状态向量列表])
+    zPred_rec: obs 的预测轨迹记录(共3个维度,与xPred_rec相同)
+"""
 def Highway_sim(env,T):
     # simulate the scenario
     collision = False
@@ -432,7 +440,7 @@ def Highway_sim(env,T):
             input_rec[i][t]=u_set[i]    # 记录 t 步的控制指令
             state_rec[i][t]=x_set[i]    # 记录 t 步的车辆状态
             backup_rec[i][t]=xx_set[i]  # 记录 t 步的备份轨迹
-            backup_choice_rec[i][t] = env.veh_set[i].backupidx  # 记录策 t 步选择的策略索引
+            backup_choice_rec[i][t] = env.veh_set[i].backupidx  # 记录第 t 步选择的策略索引
         t=t+1
     return state_rec,input_rec,backup_rec,backup_choice_rec,xPred_rec,zPred_rec,branch_w_rec,collision
 
@@ -585,11 +593,21 @@ def animate_scenario(env,state_rec,backup_rec,backup_choice_rec,xPred_rec,zPred_
         ax.add_patch(patch)
 
 
-    # animate 实现了每一帧的具体显示效果(可通过实际显示结果反推变量的含义)
+    """
+    animate 实现了每一帧的具体显示效果(可通过实际显示结果反推变量的含义)
+    输入:(注: 运行结果图中y显示的是负数,但是代码中所有变量的y都是按正数记录的)
+        t: 第几帧(第几步)
+        veh_patch: 
+        state_rec: 车辆状态记录(共3个维度[车辆序号, 时间步, 状态向量])
+        backup_rec: 未使用
+        backup_choice_rec: 未使用
+        xPred_rec: ego 的预测轨迹记录(共4个维度[时间步, 第几条预测线序号, 每条预测线上的状态序号, 状态向量(x,y,v,ψ)])
+        zPred_rec: obs 的预测轨迹记录(共4个维度,与xPred_rec相同)
+    """
     def animate(t,veh_patch,state_rec,backup_rec,backup_choice_rec,xPred_rec,zPred_rec,env,ego_idx=0):
         # 根据场景类型动态调整视野范围
         plot_merge = isinstance(env,Highway_env_merge)
-        N_veh = len(state_rec)
+        N_veh = len(state_rec)  # 所有车辆数
         ego_y = state_rec[ego_idx][t][1]
         ego_x = state_rec[ego_idx][t][0]
         ax.clear()
@@ -603,26 +621,29 @@ def animate_scenario(env,state_rec,backup_rec,backup_choice_rec,xPred_rec,zPred_
             xmax = ego_x+40
             ymin = ego_y-10
             ymax = ego_y+10
+
         try:
             ax.set_xlim(xmin, xmax)
             ax.set_ylim(-ymax,-ymin )
         except:
             pdb.set_trace()
+
+        # 绘制 ego 与 obs
         ts = ax.transData
         for i in range(0,N_veh):
-            coords = ts.transform([state_rec[i][t][0],-state_rec[i][t][1]])
+            coords = ts.transform([state_rec[i][t][0], -state_rec[i][t][1]])
             tr = matplotlib.transforms.Affine2D().rotate_around(coords[0], coords[1], -state_rec[i][t][3])
             te= ts + tr
-            veh_patch[i].set_xy([state_rec[i][t][0]-env.veh_set[i].v_length/2,-state_rec[i][t][1]-env.veh_set[i].v_width/2])
+            veh_patch[i].set_xy([state_rec[i][t][0]-env.veh_set[i].v_length/2, -state_rec[i][t][1]-env.veh_set[i].v_width/2])
             veh_patch[i].set_transform(te)
             ax.add_patch(veh_patch[i])
             idx = backup_choice_rec[i][t]
 
-        # 绘制预测轨迹
+        # 绘制 ego 的预测轨迹(colorset 表示每条预测线的颜色集合)
         colorset = ['tab:blue','tab:orange','tab:green','tab:red','tab:purple','tab:brown','tab:pink','tab:gray','tab:olive','tab:cyan','y','m','c','g']
-        for j in range(0,len(xPred_rec[t])):
-            plt.plot(xPred_rec[t][j][:,0],-xPred_rec[t][j][:,1],'b--',linewidth = 1)
-            for k in range(0,xPred_rec[t][j].shape[0]):
+        for j in range(0, len(xPred_rec[t])):   # 遍历 ego 在 t 时刻所有的预测线
+            plt.plot(xPred_rec[t][j][:,0], -xPred_rec[t][j][:,1], 'b--',linewidth = 1)
+            for k in range(0,xPred_rec[t][j].shape[0]): # 遍历第j条预测线的所有状态点
                 if k%2==1:
                     # 用半透明色块 newpatch 表示预测位置
                     newpatch = plt.Rectangle((xPred_rec[t][j][k,0]-env.veh_set[ego_idx].v_length/2,-xPred_rec[t][j][k,1]-env.veh_set[ego_idx].v_width/2), env.veh_set[ego_idx].v_length,env.veh_set[ego_idx].v_width, fc=colorset[j],alpha=0.3, zorder=0)
@@ -631,9 +652,11 @@ def animate_scenario(env,state_rec,backup_rec,backup_choice_rec,xPred_rec,zPred_
                     newpatch.set_transform(ts+tr)
                     ax.add_patch(newpatch)
 
+        # 绘制 obs 的预测轨迹
         for j in range(0,len(zPred_rec[t])):
             plt.plot(zPred_rec[t][j][:,0],-zPred_rec[t][j][:,1],'r--',linewidth = 1)
 
+        # 绘制车道线
         if plot_merge:
             if env.merge_side==0:
                 plt.plot([-10, 1000],[-lm[0], -lm[0]], 'g', linewidth=2)
