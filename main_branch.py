@@ -22,9 +22,10 @@ def sim_overtake():
     N_lane = 4
 
     # Initialize controller parameters(先初始化model与mpcParam；然后由mpcParam,model,ralpha=0.1生成mpc；最后将mpc,N_lane=4代入Highway_env_branch进行整体求解与仿真。)
-    xRef = np.array([0.5,1.8,15,0])
+    xRef = np.array([0.5, 1.8, 15, 0]) # 要lane change时的目标状态
     cons =  Branch_constants(s1=2,s2=3,c2=0.5,tran_diag=0.3,alpha=1,R=1.2,am=am,rm=rm,J_c=20,s_c=1,ylb = 0.,yub = 7.2,L=4, W=2.5,col_alpha=5,Kpsi = 0.1)
-    backupcons = [lambda x:backup_maintain(x,cons),lambda x:backup_brake(x,cons),lambda x:backup_lc(x,xRef)]
+    # 包含三种控制策略lambda函数的列表(maintain,brake,lc)
+    backupcons = [lambda x:backup_maintain(x,cons), lambda x:backup_brake(x,cons), lambda x:backup_lc(x,xRef)]
     model = PredictiveModel(n, d, N, backupcons, dt, cons)
 
     mpcParam = initBranchMPC(n,d,N,NB,xRef,am,rm,N_lane,cons.W)

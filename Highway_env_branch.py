@@ -92,7 +92,7 @@ class Highway_env():
         x_set  = [None]*self.NV # 车辆状态集合
 
         umax = np.array([self.cons.am, self.cons.rm])
-        # generate backup trajectories
+        # generate backup trajectories(每个agent都要遍历生成)
         self.xbackup = np.empty([0,(self.mpc.N+1)*4])
         for i in range(0,self.NV):
             z = self.veh_set[i].state

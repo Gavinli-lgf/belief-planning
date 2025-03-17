@@ -18,9 +18,13 @@ class PythonMsg:
             raise TypeError ('Cannot add new field "%s" to frozen class %s' %(key,self))
         else:
             object.__setattr__(self,key,value)
+
+"""
+Branch_constants:定义了分支预测,碰撞检测,车辆运动学模型中的必要的配置参数
+"""
 @dataclass
 class Branch_constants:
-     s1: float = field(default=None)
+     s1: float = field(default=None)    # 计算obs scenario tree的分支概率时的加权系数
      s2: float = field(default=None)
      c2: float = field(default=None)
      tran_diag: float = field(default=None)
@@ -35,7 +39,7 @@ class Branch_constants:
      W: float = field(default=None)
      L: float = field(default=None)
      col_alpha:float = field(default=None)
-     Kpsi: float = field(default=None)
+     Kpsi: float = field(default=None)      # 航向角与方向盘的比例控制系数
 
 @dataclass
 class Quad_constants:
