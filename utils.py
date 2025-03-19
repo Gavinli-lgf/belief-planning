@@ -36,8 +36,8 @@ class Branch_constants:
      s_c: float = field(default=None)
      ylb: float = field(default=None)
      yub: float = field(default=None)
-     W: float = field(default=None)
-     L: float = field(default=None)
+     W: float = field(default=None)         # 车宽
+     L: float = field(default=None)         # 车长
      col_alpha:float = field(default=None)
      Kpsi: float = field(default=None)      # 航向角与方向盘的比例控制系数
 

@@ -14,8 +14,8 @@ def sim_overtake():
     N = 8                                # number of time steps for each branch(对应论文中，一个branch的仿真步数)
     n = 4;   d = 2                       # State and Input dimension(状态(x,y,v,ψ);输入(a,r))
     x0 = np.array([0, 1.8, 0, 0])        # Initial condition (only for initializing the MPC, not the actual initial state of the sim)
-    am = 6.0
-    rm = 0.3
+    am = 6.0                             # maximum acceleration       
+    rm = 0.3                             # maximum steering angle rate
     dt = 0.1
     NB = 2                               # number of branching, 2 means a tree with 1-m-m^2 branches at each level.(对应论文中分支节点的子节点数)
 

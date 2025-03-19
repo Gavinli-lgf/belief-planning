@@ -34,26 +34,34 @@ def initMPCParams(nx, d, N, M, m, ydes,vdes,am,rm,N_lane,W):
     return mpcParameters
 
 def initBranchMPC(n,d,N,NB,xRef,am,rm,N_lane,W):
+    # 状态约束的系数矩阵，用于限制车辆位置 y 和航向角 psi 
     Fx = np.array([[0., 1., 0., 0.],
                    [0., -1., 0., 0.],
                    [0., 0., 0., 1.],
                    [0., 0., 0., -1.]])
 
+    # 状态约束的阈值向量，用于限制车辆位置 y 和航向角 psi 的上下限
     bx = np.array([[N_lane*3.6-W/2],   # max y
                    [-W/2],             # min y
                    [0.25],             # max psi
                    [0.25]]),           # min psi
 
+    """
+    # Fu: 输入约束的系数矩阵，用于限制车辆加速度 a 和转向角变化率 r 的上下限
+    Fu = [1, -1, 0 ,0
+          0, 0, 1, -1].T
+    """
     Fu = np.kron(np.eye(2), np.array([1, -1])).T
     bu = np.array([[am],   # -Min Acceleration
                    [am],   # Max Acceleration
                    [rm],  # -Min Steering
                    [rm]]) # Max Steering
 
-    # Tuning Parameters
+    # Tuning Parameters(Q 状态权重; R 输入权重;)
     Q = np.diag([0., 3, 3, 10.]) # vx, vy, wz, epsi, s, ey
     R = np.diag([1, 100.0])                  # delta, a
 
+    # 松弛变量权重(以处理约束违反的情况)
     Qslack = 1 * np.array([0, 300])
 
     mpcParameters    = BranchMPCParams(n=n, d=d, N=N, NB = NB, Q=Q, R=R, Fx=Fx, bx=bx, Fu=Fu, bu=bu, xRef=xRef, slacks=True, Qslack=Qslack, timeVarying = True)

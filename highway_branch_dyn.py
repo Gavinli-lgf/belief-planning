@@ -246,17 +246,17 @@ class PredictiveModel():
         self.cons = cons #parameters
         self.Asym = None    # 状态矩阵A
         self.Bsym = None    # 输入矩阵B
-        self.xpsym = None   # 状态预测函数
-        self.hsym = None    # 碰撞检测函数
-        self.zpred = None   # 备份策略预测
-        self.xpred = None   # 主策略预测
-        self.u0sym = None   # 初始控制输入
+        self.xpsym = None   # 系统状态转移方程，输入x,u,输出下一个状态xp
+        self.hsym = None    # ego与obs当前状态的碰撞检测函数
+        self.zpred = None   # obs 策略预测函数(输入obs的状态z,输出obs在m个策略下的预测轨迹x2)
+        self.xpred = None   # ego 在 maintain 策略下的预测函数
+        self.u0sym = None   # 根据状态x获取maintain策略下的控制输入u0
         self.Jh = None      # 碰撞检测的雅可比矩阵
         self.LB = [cons.W/2, N_lane*3.6-cons.W/2] #lane boundary(是road边界)
-        self.backupcons = backupcons    # 备份策略
+        self.backupcons = backupcons    # 动作策略(3个:maintain,brake,lc)
         self.calc_xp_expr() # 计算表达式
 
-
+    # 将非线性系统近似为线性系统.返回A,B,C,xp(下一个状态)
     def dyn_linearization(self, x,u):
         #linearizing the dynamics x^+=Ax+Bu+C
         A = self.Asym(x,u)
@@ -264,28 +264,39 @@ class PredictiveModel():
         xp = self.xpsym(x,u)
         C = xp-A@x-B@u
 
-        return np.array(A),np.array(B),np.squeeze(np.array(C)),np.squeeze(np.array(xp))
+        return np.array(A), np.array(B), np.squeeze(np.array(C)), np.squeeze(np.array(xp))
 
+    # 输出2个: ego,obs当前状态分布为x,z时, obs的各分支的概率p; 分支概率对于ego状态的敏感成功(即概率对ego状态的偏导). size都是(m*1)
     def branch_eval(self,x,z):
         p = self.psym(x,z)
         dp = self.dpsym(x,z)
         return np.array(p).flatten(),np.array(dp)
+    
+    # 计算 obs 在状态z时的m个策略下的预测轨迹
     def zpred_eval(self,z):
         return np.array(self.zpred(z))
+    
+    # 返回值2个:ego在maintain下的预测; ego 状态为x时执行maintain策略时的控制量.
     def xpred_eval(self,x):
         return self.xpred(x),self.u0sym(x)
+
+    """
+    # 返回值:返回两个值：
+    第一个值是线性化后的碰撞约束值，用于判断当前状态是否安全。
+    第二个值是碰撞检测函数对状态 x 的偏导，用于后续的优化或分析。
+    """
     def col_eval(self,x,z):
         dh = np.squeeze(np.array(self.dhsym(x,z)))
         h = np.squeeze(np.array(self.hsym(x,z)))
-        return h-np.dot(dh,x),dh
+        return h-np.dot(dh,x), dh
 
+    # 更新PredictiveModel中用到的策略集,并重新计算和构建预测模型所需的表达式。
     def update_backup(self,backupcons):
         self.backupcons = backupcons
         self.m = len(backupcons)
         self.calc_xp_expr()
 
-    """ 根据预测范围N内obs与ego是否有碰撞, 以及obs与道路边界是否碰撞, 计算碰撞结果h.(h>0为无碰撞)
-    """
+    # 根据预测范围N内obs与ego是否有碰撞, 以及obs与道路边界是否碰撞, 计算碰撞结果h.(h>0为无碰撞)
     def BF_traj(self,x1,x2):
         if isinstance(x1,casadi.SX):
             h = SX(x1.shape[0]*2,1)
@@ -300,7 +311,7 @@ class PredictiveModel():
             h[i+x1.shape[0]] = lane_bdry_h(x1[i,:], self.LB[0], self.LB[1])
         return softmin(h,5)
 
-    # 根据每个策略的安全性h,计算每种策略的分支概率p. (返回概率结果的维度与 h 相同)
+    # 根据每个策略的安全性h,计算每种策略的分支概率p. (返回概率结果的维度与 h 相同size为(m*1))
     def branch_prob(self,h):
         #branching probablity as a function of the safety function
         h = softsat(h,1)        # softsat 函数对所有策略的安全性数组 h 进行平滑处理，避免概率突变
@@ -308,8 +319,7 @@ class PredictiveModel():
         return m/sum1(m)        # 对加权结果进行归一化，得到每种备份策略的分支概率。
 
 
-    """ 计算和构建预测模型所需的表达式。
-    """
+    # 计算和构建预测模型所需的表达式。
     def calc_xp_expr(self):
         u = SX.sym('u', self.d) # 控制输入符号变量
         x = SX.sym('x', self.n)  # ego 状态符号变量
@@ -330,7 +340,7 @@ class PredictiveModel():
         for i in range(0,self.m):
             # 如果h[i]>0,则表示obs在第i个策略下的预测轨迹安全无碰撞。
             hi[i] = self.BF_traj(x2[:, self.n*i:self.n*(i+1)], x1)
-        p = self.branch_prob(hi)    # 根据每个策略的安全性h,计算每种策略的分支概率p
+        p = self.branch_prob(hi)    # 根据每个策略的安全性h,计算每种策略的分支概率p(size为(m*1))
 
         # 计算 ego(x) 与 obs(z) 的碰撞安全值 h(h>0意味着无碰撞)
         h = veh_col(x.T, z.T, [self.cons.L+1, self.cons.W+0.2], 1)
@@ -341,11 +351,11 @@ class PredictiveModel():
         self.Bsym = Function('B',[x,u],[jacobian(xp,u)])    # 求状态转移方程的B矩阵
         self.dhsym = Function('dh',[x,z],[jacobian(h,x)])   # ego与obs当前状态的碰撞检测h对x的偏导
         self.hsym = Function('h',[x,z],[h])     # ego与obs当前状态的碰撞检测函数
-        self.zpred = Function('zpred',[z],[x2]) #
-        self.xpred = Function('xpred',[x],[x1]) #
-        self.psym = Function('p',[x,z],[p])     #
-        self.dpsym = Function('dp',[x,z],[jacobian(p,x)])       #
-        self.u0sym = Function('u0',[x],[self.backupcons[0](x)]) #
+        self.zpred = Function('zpred',[z],[x2]) # obs 策略预测函数(输入obs的状态z,输出obs在m个策略下的预测轨迹x2)
+        self.xpred = Function('xpred',[x],[x1]) # ego 在 maintain 策略下的预测函数
+        self.psym = Function('p',[x,z],[p])     # obs 分支概率函数(输入ego状态x和obs状态z，输出obs不同策略的分支概率p,size为(m*1))
+        self.dpsym = Function('dp',[x,z],[jacobian(p,x)])       # obs 分支概率对ego状态x的偏导函数
+        self.u0sym = Function('u0',[x],[self.backupcons[0](x)]) # 根据状态x获取maintain策略下的控制输入u0
 
 class PredictiveModel_merge():
     def __init__(self, n, d, N, backupcons, dt, cons, merge_ref, laneID = 0, N_lane1 = 3, N_lane2 = 2):
