@@ -1589,6 +1589,7 @@ class robustMPC():
             self.feasible = 0
         self.Solution = res.x
 
+# 对应论文"IV. BRANCH MPC WITH RISK MEASURE OBJECTIVES"
 class BranchMPC_CVaR():
     """Model Predicitve Controller class using CVaR objective
     """

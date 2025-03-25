@@ -33,6 +33,10 @@ def initMPCParams(nx, d, N, M, m, ydes,vdes,am,rm,N_lane,W):
     mpcParameters    = MPCParams(n=nx+M*m, d=d, N=N, Q=Q, R=R, Fx=Fx, bx=bx, Fu=Fu, bu=bu, xRef=xRef, slacks=True, Qslack=Qslack, timeVarying = True)
     return mpcParameters
 
+"""
+对应论文中:"V.B Setup for the highway motion planning",
+实现了"cost function,state constraints,以及其他使用mpc方法由scenario tree生成trajectory tree"相关的定义.
+"""
 def initBranchMPC(n,d,N,NB,xRef,am,rm,N_lane,W):
     # 状态约束的系数矩阵，用于限制车辆位置 y 和航向角 psi 
     Fx = np.array([[0., 1., 0., 0.],
@@ -47,7 +51,7 @@ def initBranchMPC(n,d,N,NB,xRef,am,rm,N_lane,W):
                    [0.25]]),           # min psi
 
     """
-    # Fu: 输入约束的系数矩阵，用于限制车辆加速度 a 和转向角变化率 r 的上下限
+    Fu: 输入约束的系数矩阵，用于限制车辆加速度 a 和转向角变化率 r 的上下限
     Fu = [1, -1, 0 ,0
           0, 0, 1, -1].T
     """

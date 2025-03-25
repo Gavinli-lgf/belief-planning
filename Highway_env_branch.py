@@ -34,7 +34,7 @@ class vehicle():
         self.x_pred = []
         self.y_pred = []
         self.xbackup = None
-        self.backupidx = backupidx
+        self.backupidx = backupidx  # 经safety function h计算出的该vehicle对象最优的策略索引(0:maintain, 1:brake, 2:lc)
         self.laneidx = laneidx
     def step(self,u): # controlled vehicle
         dxdt = np.array([self.state[2]*np.cos(self.state[3]),self.state[2]*np.sin(self.state[3]),u[0],u[1]])
@@ -54,14 +54,14 @@ class Highway_env():
         self.veh_set = []   # 所有车辆对象的集合
         self.NV = NV        # 所有车辆数量
         self.N_lane = N_lane
-        self.desired_x = [None]*NV  # 所有车辆期望状态:其中l坐标是veh[i]所在车道中心线的l坐标(如果veh[i]刚进入这个车道,但l坐标还为到达这里，那么这个坐标就是个期望(desire))
+        self.desired_x = [None]*NV  # 所有agents的目标状态:其中l坐标是veh[i]所在车道中心线的l坐标(作用是使每个agent都能沿着车道中心线行驶)
         self.mpc = mpc
         self.predictiveModel = mpc.predictiveModel
         self.backupcons = mpc.predictiveModel.backupcons
 
         self.m = len(self.backupcons)
         self.cons = mpc.predictiveModel.cons
-        self.LB = [self.cons.W/2, N_lane*3.6-self.cons.W/2]
+        self.LB = [self.cons.W/2, N_lane*3.6-self.cons.W/2] # l的boundary,即对agents的l坐标进行约束(范围在road左右边界基础上加/减半个车宽)
 
         # 初始化所有车辆状态(s,l,v,ψ)(2辆车,生成 x0 为 2*4 的矩阵. ego为第0行，obs为第2行)
         x0 = np.array([[0,1.8,v0,0],[5,5.4,v0,0]])
@@ -72,56 +72,52 @@ class Highway_env():
 
 
     """
-    开始
-    ├─ 初始化控制容器
-    ├─ 遍历所有车辆
-    │   ├─ 生成预测轨迹
-    │   ├─ 计算新车道索引
-    │   └─ 条件更新车道属性
-    ├─ 非控车辆随机变道
-    ├─ 安全策略评估
-    ├─ MPC求解最优控制
-    └─ 状态更新
-    结束
+    功能: step()函数包含了branch mpc cvar单步运行的主要逻辑(外部对step的循环调用在 Highway_sim() 中).
+        1. 生成每个agent的 scenario tree 存储在 xx_set 中,并更新每个agent的desired车道,以及ego lane change的目标车道;
+        2. 遍历每个others,求其每个branch与ego branch的safety function h,并依据h求每个agent的最优策略backupidx,以及最优策略对应的输入u0_set.
+        3. 根据ego与obs的位置关系,更新ego目标状态Ydes,vdes.
+        4. 4.根据ego,obs的当前状态,ego的目标状态xRef,求解mpc.并处理求解结果.
+    输入: t_: 当前仿真时间步(是离散的时间步序号,不是当前时间)
+    输出: 
     """
     def step(self,t_):
         # initialize the trajectories to be propagated forward under the backup policy
         u_set  = [None]*self.NV # 控制指令集合（所有车辆）
-        xx_set = [None]*self.NV # 预测轨迹集合
-        u0_set = [None]*self.NV # 备用控制策略集合
+        xx_set = [None]*self.NV # scenario tree,[NV, N, m*n],(3个维度含义:agents数量NV,单个branch步数N,m个策略*n个状态)
+        u0_set = [None]*self.NV # 根据ego与每个others的子branch的safety function h,求每个obs的最优控制指令(2个维度:NV*d)
         x_set  = [None]*self.NV # 车辆状态集合
 
         umax = np.array([self.cons.am, self.cons.rm])
-        # generate backup trajectories(每个agent都要遍历生成)
         self.xbackup = np.empty([0,(self.mpc.N+1)*4])
-        for i in range(0,self.NV):
+        # 1.generate backup trajectories(生成每个agent的 scenario tree,并更新每个agent的desired车道,以及ego lane change的目标车道)
+        for i in range(0,self.NV):  # 遍历每个agent
             z = self.veh_set[i].state
-            xx_set[i] = self.predictiveModel.zpred_eval(z)  # 调用预测模型生成轨迹
+            xx_set[i] = self.predictiveModel.zpred_eval(z) # obs状态z在m个策略下的所有子branch(用于生成scenario tree)
             newlaneidx = round((z[1]-1.8)/3.6)  # 计算 veh[i] 当前所在车道序号（3.6是车道宽度,1.8是车道宽度的一半）
 
             # 触发车道更新条件（"初始时刻"或"veh[i]的车道序号发生变化,且横向位置与新车道边界偏移<1.4m"）
-            if t_==0 or (newlaneidx !=self.veh_set[i].laneidx and abs(z[1]-1.8-3.6*newlaneidx)<1.4):
+            if t_==0 or (newlaneidx != self.veh_set[i].laneidx and abs(z[1]-1.8-3.6*newlaneidx)<1.4):
                 # update the desired lane
                 self.veh_set[i].laneidx = newlaneidx        # 更新车道序号
-                self.desired_x[i][1] = 1.8+newlaneidx*3.6   # 设置新车道中心线l坐标
-                # 针对obs(i=1)的特殊处理
+                self.desired_x[i][1] = 1.8+newlaneidx*3.6   # 设置新车道中心线l值,即y坐标(作用是使每个agent都能沿着车道中心线行驶)
+                # veh_set[0]是ego,veh_set[1]是obs. 该if的逻辑就是:如果obs左侧有空闲车道,就把ego的y目标位置定在obs左侧车道;
+                # 如果obs左侧没有空闲车道,就把ego目标车道定位obs的右侧车道.(即通过obs所在车道,动态调整ego的目标车道)
                 if i==1:
-                    # 根据 ego 的 laneidx 动态调整 xRef (通过xRef动态调整参考路径，实现柔性变道)
-                    if self.veh_set[0].laneidx<self.veh_set[1].laneidx:
+                    if self.veh_set[0].laneidx < self.veh_set[1].laneidx:
                         xRef = np.array([0, 1.8+3.6*(self.veh_set[1].laneidx-1), v0, 0])
-                    elif self.veh_set[0].laneidx>self.veh_set[1].laneidx:
+                    elif self.veh_set[0].laneidx > self.veh_set[1].laneidx:
                         xRef = np.array([0, 1.8+3.6*(self.veh_set[1].laneidx+1), v0, 0])
                     else:
-                        if self.veh_set[1].laneidx>0:
+                        if self.veh_set[1].laneidx > 0:
                             xRef = np.array([0, 1.8+3.6*(self.veh_set[1].laneidx-1), v0, 0])
                         else:
                             xRef = np.array([0, 1.8+3.6*(self.veh_set[1].laneidx+1), v0, 0])
 
-                    # # 更新备用策略（包含三种：保持maintain、刹车brake、变道lc）
+                    # 更新lane change策略的xRef（包含三种：保持maintain、刹车brake、变道lc）
                     backupcons = [lambda x:backup_maintain(x,self.cons), lambda x:backup_brake(x,self.cons), lambda x:backup_lc(x,xRef)]
                     self.predictiveModel.update_backup(backupcons)
 
-            # obs(i!=0),每10步(t_%10==0)更新一次 (使用 with_probability() 实现obs的随机变道决策)
+            # obs(i!=0,说明不是ego),每10步(t_%10==0)更新一次 (使用 with_probability() 实现obs的随机变道决策)
             if t_%10==0 and i!=0:
                 # update the desired lane for the uncontrolled vehicle(obs有50%概率触发变道)
                 if with_probability(0.5):
@@ -136,34 +132,36 @@ class Highway_env():
                         else:
                             self.desired_x[i][1] = 1.8+(self.veh_set[i].laneidx+1)*3.6  # 向右变道
 
-        idx0 = self.veh_set[0].backupidx
-        n = self.predictiveModel.n
-        x1 = xx_set[0][:, idx0*n:(idx0+1)*n]
+        # 2.遍历每个others,与ego求safety function h: 将veh[0]的backupidx对应的branch,与每个other agent的子branch,以及道路边界做碰撞检测,
+        # 使用softmax function求出每个agent的最优策略,记录在对应backupidx中.并求出对应的最优输入,记录在u0_set中.
+        idx0 = self.veh_set[0].backupidx     # 获取veh[0](ego)的策略索引(0:maintain, 1:brake, 2:lc)
+        n = self.predictiveModel.n           # 状态变量个数4
+        x1 = xx_set[0][:, idx0*n:(idx0+1)*n] # 取出veh[0](ego)的第idx0个策略的子branch(从scenario tree中取)
         for i in range(0, self.NV):
-            if i!=0:    # 对其他 obs 车辆的每个 backupcons 进行安全评估
+            if i!=0:    # 将每个 others 与 veh[0](ego) 进行安全评估
                 hi = np.zeros(self.m)
                 for j in range(0, self.m):
                     # 计算安全指数（碰撞检测 + 车道边界约束）
-                    hi[j] = min(np.append(veh_col(x1, xx_set[i][:,j*n:(j+1)*n], [self.cons.L+1,self.cons.W+0.2]), lane_bdry_h(x1,self.LB[0],self.LB[1])))
-                self.veh_set[i].backupidx = np.argmax(hi)   # 选择最安全的备用策略索引
+                    hi[j] = min(np.append(veh_col(x1, xx_set[i][:,j*n:(j+1)*n], [self.cons.L+1,self.cons.W+0.2]), lane_bdry_h(x1, self.LB[0], self.LB[1])))
+                self.veh_set[i].backupidx = np.argmax(hi)   # 选择最安全的策略索引
 
-            # 应用备用策略生成控制指令
+            # 根据obs当前状态,与最优策略,生成其控制指令
             u0_set[i]=self.backupcons[self.veh_set[i].backupidx](self.veh_set[i].state)
 
-
-        # set x_ref for the overtaking maneuver and call the MPC(根据ego与obs的相对位置关系，设置xRef,并求解mpc.)
-        # 根据 ego 与 obs 的纵向相对位置,设置 ego 的期望l坐标 Ydes
-        if self.veh_set[0].state[0]<self.veh_set[1].state[0]:   # ego 车辆在 obs 车辆前面
+        # 3.set x_ref for the overtaking maneuver (根据ego与obs的位置关系,更新ego目标状态Ydes,vdes)
+        # 如果ego在obs后面,ego就正常走自己的车道;如果ego在obs前面,ego就lane change到obs所在车道.
+        if self.veh_set[0].state[0] < self.veh_set[1].state[0]:  
             Ydes = 1.8+self.veh_set[0].laneidx*3.6  # 计算 ego 所在车道中心线的 l 坐标(也是期望l坐标)
-        else:   # ego 在 obs 前面时,ego的期望l坐标就是obs当前所处车道的中心线的l坐标
+        else:  
             Ydes = self.veh_set[1].state[1]
 
-        # 根据 ego 是否已经正常对 obs 完成overtake,设置 ego 的期望速度 vdes   
+        # 根据ego与obs位置判断,如果ego已经对obs完成overtake和merge,就设置ego的期望速度为v0;否则根据模型计算ego的期望速度
         if abs(self.veh_set[0].state[1]-Ydes)<1 and self.veh_set[0].state[0]>self.veh_set[1].state[0]+3:
             vdes = v0
         else:
             vdes = self.veh_set[1].state[2] + 1*(self.veh_set[1].state[0]+1.5-self.veh_set[0].state[0])
 
+        # 4.根据ego,obs的当前状态,ego的目标状态xRef,求解mpc.并处理求解结果.
         # Ydes = 1.8+self.veh_set[0].laneidx*3.6
         # vdes = self.veh_set[1].state[2]+5
         xRef = np.array([0,Ydes,vdes,0])
@@ -382,6 +380,8 @@ class Highway_env_merge():
         return u_set,x_set,xx_set,xPred,zPred,branch_w
 
 """
+功能:该函数是使用branch mpc cvar对象,进行仿真运行的总入口。实现了使用仿真环境对象 env,进行总共时间为T秒的仿真.(返回值用于可视化)
+输入:env 集成了BranchMpcCVaR对象等整体的仿真环境对象; T 仿真总时长s;
 输出:(注: 运行结果图中y显示的是负数,但是代码中所有变量的y都是按正数记录的)
     state_rec: 车辆状态记录 (共3个维度[车辆序号, 时间步, 状态向量列表])
     input_rec: 控制输入记录 (共3个维度[车辆编号, 时间步, 控制向量列表])
@@ -398,31 +398,31 @@ def Highway_sim(env,T):
     Ts_update = 4
     N_update = int(round(Ts_update/dt))
     N = int(round(T/dt))                  # 总仿真步数
-    state_rec = np.zeros([env.NV, N, 4])  # 车辆状态记录 [车辆编号, 时间步, 状态向量]
+    state_rec = np.zeros([env.NV, N, 4])  # 车辆状态记录 [车辆编号, 时间步, 状态向量] (env.NV 车辆数量)
     b_rec = [None]*N
-    backup_rec = [None]*env.NV          # 各车辆的备份轨迹
-    backup_choice_rec = [None]*env.NV   # 备份策略选择索引
-    xPred_rec = [None]*N
-    zPred_rec = [None]*N
-    branch_w_rec = [None]*N
-    for i in range(0,env.NV):
+    backup_rec = [None]*env.NV          # 各车辆的备份轨迹 [车辆编号, 时间步]
+    backup_choice_rec = [None]*env.NV   # 备份策略选择索引 [车辆编号, 时间步]
+    xPred_rec = [None]*N        # ego单条预测 [时间步, 状态]
+    zPred_rec = [None]*N        # obs单条预测 [时间步, 状态]
+    branch_w_rec = [None]*N     # trajectory tree中的w记录 [时间步, w]
+    for i in range(0, env.NV):
         backup_rec[i]=[None]*N
         backup_choice_rec[i] = [None]*N
     input_rec = np.zeros([env.NV, N, 2])     # 控制输入记录 [车辆编号, 时间步, 控制向量]
     f0 = np.array([v0,0,0,0])
-    for i in range(0,len(env.veh_set)):
+    for i in range(0, len(env.veh_set)):     # 在state_rec中记录所有agents的初始状态
         state_rec[i][t]=env.veh_set[i].state
 
     # 主仿真循环(步长dt,总时间T,总仿真步数N)
     xx_set = []
     dis = 100
     while t<N:  # t 是仿真步数
-        # 碰撞检测模块
+        # 碰撞检测模块(判断当前时刻任意两个agent之间是否发生碰撞,检测结果记录在 collision 中)
         if not collision:
             for i in range(0, env.NV):
                 for j in range(0, env.NV):
                     if i!=j:
-                        # 计算车辆间距（考虑车体尺寸）
+                        # 两车纵向位置x差的绝对值,减去两车长度之和的一半,得到纵向净距离;两车横向位置y差的绝对值,减去两车宽度之和的一半,得到横向净距离;再取2者中的最大值作为dis.
                         dis = max(abs(env.veh_set[i].state[0]-env.veh_set[j].state[0])-0.5*(env.veh_set[i].v_length+env.veh_set[j].v_length),\
                         abs(env.veh_set[i].state[1]-env.veh_set[j].state[1])-0.5*(env.veh_set[i].v_width+env.veh_set[j].v_width))
                 if dis<0:   # 发生碰撞
@@ -709,7 +709,13 @@ def animate_scenario(env,state_rec,backup_rec,backup_choice_rec,xPred_rec,zPred_
         plt.show()
 
 
-
+"""
+输入: mpc BranchMpcCVaR对象, N_lane 车道数
+功能: 实现"overtake then lane change"整个仿真过程
+    1. 将mpc以及其他参数传入Highway_env,生成整个仿真环境对象。
+    2. 调用Highway_sim,实现仿真过程。
+    3. 调用animate_scenario,实现仿真结果的可视化。
+"""
 def sim_overtake(mpc,N_lane):
 
     env = Highway_env(NV=2,mpc = mpc,N_lane=N_lane)
