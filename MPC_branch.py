@@ -39,9 +39,9 @@ class BranchMPCParams(PythonMsg):
     dR: np.array = field(default=None) # Quadratic rate cost
 
     Qslack: float = field(default=None) # it has to be a vector. Qslack = [linearSlackCost, quadraticSlackCost]
-    Fx: np.array = field(default=None) # State constraint Fx * x <= bx
+    Fx: np.array = field(default=None) # State constraint Fx * x <= bx(每个状态节点都有约束,Fx是(4*4),bx是(4*1))
     bx: np.array = field(default=None)
-    Fu: np.array = field(default=None) # State constraint Fu * u <= bu
+    Fu: np.array = field(default=None) # State constraint Fu * u <= bu(Fu是(4*2),bu是(4*1))
     bu: np.array = field(default=None)
     xRef: np.array = field(default=None)
 
@@ -56,18 +56,23 @@ class BranchMPCParams(PythonMsg):
 ############################################################################################
 ####################################### MPC CLASS ##########################################
 ############################################################################################
+
+"""
+功能: 定义Branch结构(场景树与轨迹树branch结构相同,包含N个时间步)
+输入: xtraj:(N*n),ego的branch; ztraj:(N*n),obs的branch; utraj:(n*d),ego输入预测; w:branch的概率(权重), depth:branch的深度(处于第几层)
+     (注branch的大小N不完全相同:根branch的N=1; 其它branch的N=8.)
+"""
 class BranchTree():
-    # 定义Branch(包含场景树与轨迹树对应分支,包含N个时间步):xtraj(N*n),ego预测; ztraj(N*n),obs预测; utraj(n*d),输入预测; 概率(权重)w, 深度depth
     def __init__(self,xtraj,ztraj,utraj,w,depth=0):
-        self.xtraj = xtraj  # 该branch的 ego 预测
-        self.ztraj = ztraj  # 该branch的 obs 预测
-        self.utraj = utraj  # 该branch的 ego 输入
-        self.dynmatr = [None]*xtraj.shape[0]    #每个时间步ego的动态模型参数A,B,C
+        self.xtraj = xtraj  # 该branch的 ego 预测(N*n)
+        self.ztraj = ztraj  # 该branch的 obs 预测(N*n)
+        self.utraj = utraj  # 该branch的 ego 输入(n*d)
+        self.dynmatr = [None]*xtraj.shape[0]    #每个时间步ego的动态模型参数A,B,C(每个时间步的x,u不同,则线性化后的结果也不同)
         self.w = w          # 该Branch的概率(权重)
         self.children = []  # 该Branch的子Branch列表(个数就是策略个数m)
         self.depth = depth  # 该Branch的深度
-        self.p = None       # 存储该Branch的子branch的概率(个数m)
-        self.dp = None      # 上面p对ego转态x的导数(个数m)
+        self.p = None       # 存储该Branch的子branch的概率(m*1)
+        self.dp = None      # 上面p对ego转态x的导数(m*1)
         self.J = 0
     def addchild(self,BT):
         self.children.append(BT)
@@ -1599,7 +1604,7 @@ class BranchMPC_CVaR():
             mpcParameters: struct containing MPC parameters
         """
         self.N      = mpcParameters.N       # number of time steps in between branches
-        self.NB     = mpcParameters.NB      # number of branching
+        self.NB     = mpcParameters.NB      # number of branching(tree的最大深度,即branch的最大层数,根branch深度为0)
         self.Qslack = mpcParameters.Qslack  # it has to be a vector. Qslack = [linearSlackCost, quadraticSlackCost]
         self.Q      = mpcParameters.Q       # quadratic state cost
         self.Qf     = mpcParameters.Qf      # quadratic state cost final
@@ -1607,15 +1612,15 @@ class BranchMPC_CVaR():
         self.dR     = mpcParameters.dR      # Quadratic rate cost
         self.n      = mpcParameters.n       # dimension state space
         self.d      = mpcParameters.d       # dimension input space
-        self.Fx     = mpcParameters.Fx      # State constraint Fx * x <= bx
-        self.Fu     = mpcParameters.Fu      # Input constraint Fu * u <= bu
+        self.Fx     = mpcParameters.Fx      # State constraint Fx * x <= bx (每个状态节点都有约束,Fx是(4*4),bx是(4*1))
+        self.Fu     = mpcParameters.Fu      # Input constraint Fu * u <= bu (Fu是(4*2),bu是(4*1))
         self.bx     = mpcParameters.bx      # 对应 Fx,状态约束的阈值向量 [max y,min y,max psi,min psi]
         self.bu     = mpcParameters.bu      # 对应 Fu,输入约束的阈值向量 [-min a,max a,-min r,max r]
         self.xRef   = mpcParameters.xRef    # sim_overtake()中,要lane change时的目标状态
         self.m      = predictiveModel.m     # number of policies(3个:maintain,brake,lc)
         self.psimax = mpcParameters.bx[0][2][0]
-        self.S      = S                # for cross-product terms in the cost
-        self.ralpha  = ralpha          # CVaR parameter,默认 0.1
+        self.S      = S              # for cross-product terms in the cost(应该是QP转化为SOCP用到的,最终会用在SOCP的不等式约束中)
+        self.ralpha  = ralpha        # CVaR parameter,默认 0.1
         self.param  = mpcParameters
 
         # for the SOCP constraints, calculate the cholesky decomposition of Q and R matrices to encode the cost
@@ -1638,23 +1643,23 @@ class BranchMPC_CVaR():
                 self.Wdu = linalg.sqrtm(dRmat)
 
         self.slacks          = mpcParameters.slacks
-        self.slackweight     = None
+        self.slackweight     = None  # 整个tree上所有状态节点的slack weight,size:(totalx*(Fx.shape[0]+1), 1)
         self.timeVarying     = mpcParameters.timeVarying
         self.predictiveModel = predictiveModel
         self.osqp = None
-        self.BT = None
-        self.totalx = 0 # 记录整个tree中状态节点数
-        self.totalu = 0 # 记录整个tree中输入节点数
-        self.ndx = {}   # map:记录每个branch与其所包含的所有状态节点的起始索引
-        self.ndu = {}   # map:记录每个branch与其所包含的所有输入节点的起始索引
-        self.branchidx = {} # map:记录每个branch的索引(对branch编号,不同于状态节点的变化)
+        self.BT = None      # tree的根branch
+        self.totalx = 0     # 记录整个tree中状态节点数
+        self.totalu = 0     # 记录整个tree中输入节点数
+        self.ndx = {}       # map:记录每个branch与其所包含的所有状态节点的起始索引
+        self.ndu = {}       # map:记录每个branch与其所包含的所有输入节点的起始索引
+        self.branchidx = {} # map:记录每个branch的索引(对branch编号,不同于状态节点的编号)
         self.branchdim = 0  # 整个tree中branch的数量
 
-        self.xPred = None
-        self.uPred = None
-        self.xLin = None
-        self.uLin = None
-        self.OldInput = np.zeros(self.d)
+        self.xPred = None   # SOCP求解结果的(0 ~ self.totalx*self.n)部分,reshape为(-1,self.n),即self.totalx行,self.n列; 
+        self.uPred = None   # SOCP求解结果的(self.totalx*self.n ~ self.totalx*self.n+self.totalu*self.d)不分,reshape为(-1,self.d),即self.totalu行,self.d列;
+        self.xLin = None    # SOCP求解结果,也是self.xPred的转置为(n, totalx)的二维数组,每列表示一个状态。
+        self.uLin = None    # SOCP求解结果,也是self.uPred的转置为(d, totalu)的二维数组,每列表示一个输入。
+        self.OldInput = np.zeros(self.d)    # 记录总仿真时间T(10秒)内,每个仿真步长(0.1秒)的自车实际使用的输入
 
         # initialize time
         startTimer = datetime.datetime.now()
@@ -1664,51 +1669,52 @@ class BranchMPC_CVaR():
         self.timeStep = 0
 
     """
-    初始化场景树(scenario tree):
-    1.通过广度优先搜索(BFS)构建树(似乎包含了scenario tree与trajectory tree).以ego,obs当前状态x,z构建根branch,共拓展self.NB层,每层共m个子branch。
-    2.场景树的每个branch包含xtraj,ztraj,utraj,w,depth等信息,用于 Branch MPC 的优化计算.
-    3.该tree为后续的 CVaR 计算和约束构建提供了基础。
+    功能: 初始化tree,包括场景树(scenario tree)和轨迹树(trajectory tree):其中scenario tree是最终结果;而trajectory tree只是生成了对应结构,并不是最终结果.
+        1.通过广度优先搜索(BFS)构建树.以ego,obs当前状态x,z构建根branch,共拓展self.NB层(0,1,2共3层),每层共m个子branch。
+        2.树的每个branch包含ztraj,w,depth,p,dp等信息,用于 Branch MPC 的优化计算.
+        3.该tree为后续的 CVaR 计算和约束构建提供了基础。
+    输入: x ego当前状态; z obs当前状态;
     """
     def inittree(self,x,z):
         # 初始化根branch(根branch就1个节点,对应ego与obs的状态就是他们的当前状态; 概率1; 深度0)
         u = np.zeros(self.d)
         self.BT = BranchTree(np.reshape(x,[1,self.n]), np.reshape(z,[1,self.n]), np.reshape(u,[1,self.d]), 1, 0)
         q = [self.BT]   # BFS广搜的队列
-        countx = 0  # 记录整个tree中状态节点数(那么每个branch中包含N个状态节点的序号范围就是 countx ~ countx+N-1)
-        countu = 0  # 同上countx
+        countx = 0      # 记录整个tree中状态节点数(那么每个branch中包含N个状态节点的序号范围就是 countx ~ countx+N-1)
+        countu = 0      # 同上
         countbranch = 0
         self.uLin = np.reshape(u,[1,self.d])
         self.xLin = np.reshape(x,[1,self.n])
 
-        # 记录每个branch包含的所有状态节点的起始索引
+        # 记录每个branch包含所有状态节点的起始索引(是一个map,key:branch对象,value:状态节点的起始索引)
         self.ndx[self.BT] = countx  # 记录根branch的起始节点索引
         self.ndu[self.BT] = countu  # 同上
 
         # 线性化动态模型
-        A,B,C,xp = self.predictiveModel.dyn_linearization(x,u)
+        A,B,C,xp = self.predictiveModel.dyn_linearization(x,u) # 返回A,B,C,xp(下一个状态)
         self.BT.dynmatr[0] = (A,B,C)
         countx+=self.BT.xtraj.shape[0]
         countu+=self.BT.xtraj.shape[0]
 
-        # 广度优先搜索扩展scenario tree
+        # 使用广度优先搜索,生成scenario tree
         while len(q)>0:
             currentbranch = q.pop(0)
 
-            # 如果当前branch深度小于branch最大数量，继续扩展
+            # 如果当前branch深度小于branch最大数量(2)，继续扩展(根branch深度为0,所以有0,1,2共3层)
             if currentbranch.depth<self.NB:
-                self.branchidx[currentbranch] = countbranch
+                self.branchidx[currentbranch] = countbranch #用map给每个branch编号
                 countbranch+=1
-                # 生成obs在状态z时的m个策略下的预测轨迹zPred
-                zPred = self.predictiveModel.zpred_eval(currentbranch.ztraj[-1])
-                p,dp = self.predictiveModel.branch_eval(currentbranch.xtraj[-1], currentbranch.ztraj[-1])
-                currentbranch.p = p
+                # 1.生成obs的子branch:在obs状态z,m个策略下的子branch(包括每个branch的p,dp,w,depth,xtraj,utraj等信息)
+                zPred = self.predictiveModel.zpred_eval(currentbranch.ztraj[-1])    # size: (N, m*n)
+                p,dp = self.predictiveModel.branch_eval(currentbranch.xtraj[-1], currentbranch.ztraj[-1])   # size: (m,1),因为对每个branch而言的
+                currentbranch.p = p     # 每个子branch的概率p,累加=1(具体说明看论文)
                 currentbranch.dp= dp
-                # 对当前节点生成m个子branch(对应m个策略),并计算每个branch分配概率p与深度depth,并按[0,0]输入生成N步的utraj和xtraj
-                for i in range(0,self.m):
+                # 2.初始化ego的子branch: 对utraj和xtraj只是先初始化,并不是最终的求解结果
+                for i in range(0, self.m):
                     xtraj = np.zeros((self.N, self.n))
                     utraj = np.zeros((self.N, self.d))
                     newbranch = BranchTree(xtraj, zPred[:, self.n*i:self.n*(i+1)], utraj, p[i]*currentbranch.w, currentbranch.depth+1)
-                    # 线性化动态模型并预测状态轨迹
+                    # 根据论文式(5b)求xp,即newbranch的初始状态与其父分支的最后一个状态之间，也要满足状态转移方程。
                     A,B,C,xp = self.predictiveModel.dyn_linearization(currentbranch.xtraj[-1], currentbranch.utraj[-1])
                     newbranch.xtraj[0] = xp
                     for t in range(0,self.N):
@@ -1736,7 +1742,8 @@ class BranchMPC_CVaR():
         # 记录总状态和输入维度
         self.totalx = countx
         self.totalu = countu
-        self.slackweight = np.zeros(self.totalx*(self.Fx.shape[0]+1))
+        # 每个状态节点都有"self.Fx.shape[0]+1"个约束,故可得整个tree上所有状态节点的约束数量(等于slackweight的长度)
+        self.slackweight = np.zeros(self.totalx*(self.Fx.shape[0]+1)) 
         self.branchdim = countbranch
 
     # 构建等式约束
@@ -1777,7 +1784,7 @@ class BranchMPC_CVaR():
 
         ## dual formulation of CVaR opt
         # rho(i)=-s(i)+1/alpha*dot(mum(i,:),P(i,:))
-        Arisk = np.zeros([self.branchdim,self.branchdim*(self.m*2+2)])
+        Arisk = np.zeros([self.branchdim, self.branchdim*(self.m*2+2)])
         for branch in self.branchidx:
             idx = self.branchidx[branch]
             Arisk[idx,idx] = 1
@@ -1792,10 +1799,12 @@ class BranchMPC_CVaR():
             self.G = np.hstack( ( self.G,np.zeros([self.G.shape[0],1]) ) )
 
 
-    """根据当前新的状态与优化的结果,对树中各个分支的p,dp,w,ztraj,xtraj,dynmatr进行更新
+    """
+    输入: x ego当前状态; z obs当前状态;
+    功能: 根据ego,obs当前时间步新的状态与上个时间步SOCP优化结果优化的结果self.uLin,对树中各个branch进行更新.
     """
     def updatetree(self,x,z):
-        # 1.根据优化结果,更新每个分支的输入轨迹 utraj
+        # 1.根据SOCP优化结果 self.uLin,更新每个branch的 utraj
         for branch in self.ndx:
             l = branch.utraj.shape[0]
             branch.utraj[0:l-1] = self.uLin[self.ndu[branch]+1:self.ndu[branch]+l]
@@ -1807,7 +1816,8 @@ class BranchMPC_CVaR():
             else:
                 # 对于深度等于 NB 的分支，使用当前utraj中倒数第二个输入作为最后一个输入
                 branch.utraj[-1] = branch.utraj[-2]
-        # 2.更新根branch:先更新根branch中ego与obs的状态序列(根branch状态序列的个数只有1个)
+
+        # 2.更新根branch:更新根branch中ztraj,xtraj(根branch状态序列的个数只有1个)
         self.BT.ztraj = np.reshape(z,[1,self.n])
         self.BT.xtraj = np.reshape(x,[1,self.n])
         # 更新根branch的动态模型参数dynmatr,即A,B,C
@@ -1815,7 +1825,7 @@ class BranchMPC_CVaR():
             A,B,C,xp = self.predictiveModel.dyn_linearization(self.BT.xtraj[i],self.BT.utraj[i])
             self.BT.dynmatr[i]=(A,B,C)
 
-        # 3.广度优先搜索更新场景树(根据当前新的状态与优化的结果,对树中各个分支的p,dp,w,ztraj,xtraj,dynmatr进行更新)
+        # 3.根据"ego,obs当前状态x,z,SOCP优化结果更新后的utraj",使用BFS更新整个tree(主要更新树各个分支除utraj外的其它量,包括p,dp,w,ztraj,xtraj,dynmatr等。)
         q = [self.BT]
         while len(q)>0:
             currentbranch = q.pop(0)
@@ -1844,51 +1854,58 @@ class BranchMPC_CVaR():
 
 
     """
-    构建不等式约束矩阵 F 和对应的约束向量 b,这些约束用于描述状态和输入的约束条件,以及碰撞避免约束:
-    1.
+    构建不等式约束矩阵 F 和对应的约束向量 b:
+    1. 构建tree上所有节点状态x的Ineq约束: 1.Fxtot * x_tot <= bxtot(如果有S,就要考虑在Fxtot中); 2. self.slackweight
+    2. 构建tree上所有节点输入u的Ineq约束: Futot * u_tot <= butot
+    3. 构建tree上所有branch与 CVaR 目标相关的不等式约束
+    4. build inequality for CVaR opt(构建 CVaR 优化的不等式约束)
+    .....其它,看不懂....
     """
     def buildIneqConstr(self):
         # The inequality constraint is Fz<=b (不等式约束的形式)
         # Let's start by computing the submatrix of F relates with the state(首先构建与状态相关的子矩阵)
-        Nc = self.Fx.shape[0]+1
-        slackweight_x = np.zeros(self.totalx*Nc)
+        Nc = self.Fx.shape[0]+1                     # tree中每个状态节点Nc个约束
+        slackweight_x = np.zeros(self.totalx*Nc)    # tree上所有状态节点松弛权重.size:(totalx*(Fx.shape[0]+1), 1)
 
-        bdim = self.branchdim
-        nslack = slackweight_x.shape[0]
-        offset = self.totalx*self.n+self.totalu*self.d
-        Fxtot = np.zeros([Nc*self.totalx, self.totalx*self.n])
-        bxtot = np.zeros(Nc*self.totalx)
-        # 如果没有状态变换矩阵 S，直接使用 Wx
+        bdim = self.branchdim                       # 整个tree中branch的数量
+        nslack = slackweight_x.shape[0]             # 值为 self.totalx*Nc
+        offset = self.totalx*self.n+self.totalu*self.d          # totalx*n + totalu*d
+        Fxtot = np.zeros([Nc*self.totalx, self.totalx*self.n])  # ineq约束的系数矩阵,shape:(totalx*Nc, totalx*n)
+        bxtot = np.zeros(Nc*self.totalx)                        # ineq约束的右侧向量,shape:(totalx*Nc, 1)
+        # 构建tree上所有节点状态x的Ineq约束: 1.Fxtot * x_tot <= bxtot(如果有S,就要考虑在Fxtot中); 2. self.slackweight
         if self.S is None:
             for branch in self.ndx:
                 l = branch.utraj.shape[0]
+                # tree中每个状态节点的Ineq约束的系数矩阵,对应Fxtot中一个(Nc,n)的子矩阵; 节点Ineq约束的右侧向量,对应bxtot中一个(Nc, 1)的子向量
+                # 显然每个状态节点有Nc(1+n)共5个约束:-dh*x<=h (1个); Fx*x<=bx (4个);
                 for i in range(0,l):
-                    # 计算碰撞约束的线性化形式
+                    # safe function h的线性化形式 h(shape:标量),与偏导 dh(shape:(1, n))
                     h,dh = self.predictiveModel.col_eval(branch.xtraj[i], branch.ztraj[i])
-                    idx = self.ndx[branch]+i
+                    idx = self.ndx[branch]+i    # idx:当前状态节点在整个tree中的索引
                     Fxtot[idx*Nc:(idx+1)*Nc, idx*self.n:(idx+1)*self.n] = np.vstack((-dh, self.Fx))
-                    bxtot[idx*Nc:(idx+1)*Nc] = np.append(h,self.bx)
-                    slackweight_x[idx*Nc:(idx+1)*Nc] = branch.w
+                    bxtot[idx*Nc:(idx+1)*Nc] = np.append(h, self.bx)
+                    slackweight_x[idx*Nc:(idx+1)*Nc] = branch.w # 同一个branch上的所有节点的松弛权重相同
         else:
             for branch in self.ndx:
                 l = branch.utraj.shape[0]
                 for i in range(0,l):
                     h,dh = self.predictiveModel.col_eval(branch.xtraj[i],branch.ztraj[i])
                     idx = self.ndx[branch]+i
-                    Fxtot[idx*Nc:(idx+1)*Nc,idx*self.n:(idx+1)*self.n] = np.vstack((-dh,self.Fx@self.S))
-                    bxtot[idx*Nc:(idx+1)*Nc] = np.append(h,self.bx)
+                    Fxtot[idx*Nc:(idx+1)*Nc, idx*self.n:(idx+1)*self.n] = np.vstack((-dh, self.Fx@self.S))
+                    bxtot[idx*Nc:(idx+1)*Nc] = np.append(h, self.bx)
                     slackweight_x[idx*Nc:(idx+1)*Nc] = branch.w
 
-        self.slackweight = slackweight_x
-        # Let's start by computing the submatrix of F relates with the input(构建与输入相关的子矩阵)
-        rep_b = [self.Fu] * (self.totalu)
-        Futot = linalg.block_diag(*rep_b)
-        butot = np.tile(np.squeeze(self.bu), self.totalu)
+        self.slackweight = slackweight_x    # size:(totalx*Nc, 1)
+        # 构建tree上所有节点输入u的Ineq约束: Futot * u_tot <= butot
+        # Let's start by computing the submatrix of F relates with the input
+        rep_b = [self.Fu] * (self.totalu)   # Fu是(4*2),重复self.totalu次,形成列表
+        Futot = linalg.block_diag(*rep_b)   # 拼接成一个块对角矩阵,shape:(totalu*4, totalu*2)
+        butot = np.tile(np.squeeze(self.bu), self.totalu)  # bu是(4*1),重复self.totalu次,形成一个向量,shape:(totalu*4, 1)
 
-        # 构建与 CVaR 目标相关的不等式约束
-        Frisk = np.zeros([bdim*(2*self.m+1),bdim*(self.m*2+2)])
-        Frisk[0:bdim,0:bdim] = -np.eye(bdim)
-        Frisk[bdim:,bdim*2:bdim*(2+2*self.m)] = -np.eye(2*bdim*self.m)
+        # 构建tree上所有branch与 CVaR 目标相关的不等式约束
+        Frisk = np.zeros([bdim*(2*self.m+1), bdim*(self.m*2+2)])
+        Frisk[0:bdim, 0:bdim] = -np.eye(bdim)
+        Frisk[bdim:, bdim*2:bdim*(2+2*self.m)] = -np.eye(2*bdim*self.m)
 
         # 合并所有约束
         F_hard = linalg.block_diag(Fxtot, Futot, Frisk)
@@ -2014,7 +2031,10 @@ class BranchMPC_CVaR():
                     self.slackweight[idx*Nc:(idx+1)*Nc] = branch.w
 
 
-    # 
+    """
+    输入: x ego当前状态; z obs当前状态; xRef ego目标状态; S 状态变换矩阵; Fx,bx State constraint Fx * x <= bx;
+    功能: solve是整个BranchMPC_CVaR算法的核心。初始化场景树,更新场景树,构建约束,使用 ECOS 求解器求解 SOCP(二阶锥规划)问题,提取解。
+    """
     def solve(self, x, z, xRef = None,S = None, Fx = None, bx = None):
         """Computes control action
         Arguments:
@@ -2022,7 +2042,6 @@ class BranchMPC_CVaR():
             z: uncontrolled vehicle state
             xRef: desired state
             S: state transformation matrix (if different from identity)
-
         """
         # If LTV active --> identify system model
         if not xRef is None:
@@ -2033,29 +2052,31 @@ class BranchMPC_CVaR():
             self.Fx = Fx
         if not bx is None:
             self.bx = bx
+
+        # 如果场景树未初始化,则构建场景树与不等式约束条件;否则更新场景树与不等式约束条件。
         if self.BT is None:
-            self.inittree(x,z)
+            self.inittree(x,z)      # inittree中scenario tree是最终结果;而trajectory tree只是生成了对应结构,并不是最终结果.
             self.buildIneqConstr()
         else:
-
-            self.updatetree(x,z)
+            self.updatetree(x,z)    #根据ego,obs当前时间步新的状态与上个时间步SOCP优化结果优化的结果self.uLin,对树中各个branch进行更新.
             self.updateIneqConstr()
 
-        self.buildEqConstr()
+        self.buildEqConstr()    # 构建等式约束条件
 
-
-        self.q_FTOCP = np.zeros(self.F.shape[1])
+        # 构建SOCP(二阶锥规划)问题的参数,并使用 ECOS 求解器求解
+        self.q_FTOCP = np.zeros(self.F.shape[1])    # 目标函数的线性部分，最后一个元素为 1，表示最小化总成本。
         self.q_FTOCP[-1] = 1
-        self.F_FTOCP = sparse.csc_matrix(self.F)
+        self.F_FTOCP = sparse.csc_matrix(self.F)    # F_FTOCP 和 b_FTOCP: 不等式约束矩阵和右侧向量
         self.b_FTOCP = self.b
-        self.G_FTOCP = sparse.csc_matrix(self.G)
-        self.E_FTOCP = self.E
+        self.G_FTOCP = sparse.csc_matrix(self.G)    # 等式约束矩阵
+        self.E_FTOCP = self.E       # E_FTOCP 和 L_FTOCP: 等式约束的右侧向量。
         self.L_FTOCP = self.L
 
         # Solve QP
         startTimer = datetime.datetime.now()
+        # np.add(np.dot(self.E_FTOCP,x),self.L_FTOCP): 计算等式约束的右侧向量。
         self.ecos_solve_socp(self.q_FTOCP, self.F_FTOCP, self.b_FTOCP, self.dims, self.G_FTOCP, np.add(np.dot(self.E_FTOCP,x),self.L_FTOCP))
-        self.unpackSolution()
+        self.unpackSolution()   # 解析优化结果
         endTimer = datetime.datetime.now(); deltaTimer = endTimer - startTimer
         self.solverTime = deltaTimer
         # print("Solver Time: ", self.solverTime.total_seconds(), " seconds.")
@@ -2070,10 +2091,13 @@ class BranchMPC_CVaR():
     def unpackSolution(self):
         # Extract predicted state and predicted input trajectories
         if self.feasible:
+            # (0 ~ self.totalx*self.n)是 xPred,需要reshape维度为(-1,self.n); 
             self.xPred = np.squeeze(np.transpose(np.reshape((self.Solution[np.arange(self.totalx*self.n)]),(-1,self.n)))).T
+            # (self.totalx*self.n ~ self.totalx*self.n+self.totalu*self.d)是 uPred,需要reshape维度为(-1,self.d);
             self.uPred = np.squeeze(np.transpose(np.reshape((self.Solution[self.totalx*self.n+np.arange(self.totalu*self.d)]),(-1, self.d)))).T
-            self.xLin = self.xPred  # self.xPred从优化结果中提取,后转换为(n,*)的二维数组,每列表示一个状态。
-            self.uLin = self.uPred  # self.uPred从优化结果中提取,后转换为(d,*)的二维数组,每列表示一个输入。
+
+            self.xLin = self.xPred  # self.xPred 从优化结果中提取,后转换为(n,totalx)的二维数组,每列表示一个状态。
+            self.uLin = self.uPred  # self.uPred 从优化结果中提取,后转换为(d,totalu)的二维数组,每列表示一个输入。
             self.uLin = np.vstack((self.uLin, self.uLin[-1]))   #在 uLin 的末尾添加最后一个输入，以确保输入序列长度与状态序列长度一致。
 
     def BT2array(self):
@@ -2092,7 +2116,7 @@ class BranchMPC_CVaR():
                 q.append(child)
         return xtraj,ztraj,utraj, branch_w
 
-
+    # 使用 ECOS 求解器求解 SOCP(二阶锥规划)问题,并返回优化结果给 self.Solution
     def ecos_solve_socp(self, q, G, h, dims, Ae=None, be=None, initvals=None):
         """
         Solve a SOCP using ECOS:

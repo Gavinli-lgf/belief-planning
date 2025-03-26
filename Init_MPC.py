@@ -10,7 +10,7 @@ def initMPCParams(nx, d, N, M, m, ydes,vdes,am,rm,N_lane,W):
                    [0., -1., 0., 0.],
                    [0., 0., 0., 1.],
                    [0., 0., 0., -1.]])
-    Fx = np.hstack((Fx,np.zeros([Fx.shape[0],m*M])))
+    Fx = np.hstack((Fx, np.zeros([Fx.shape[0], m*M])))
 
     bx = np.array([[N_lane*3.6-W/2],   # max y
                    [-W/2],             # min y

@@ -55,7 +55,7 @@ class Highway_env():
         self.NV = NV        # 所有车辆数量
         self.N_lane = N_lane
         self.desired_x = [None]*NV  # 所有agents的目标状态:其中l坐标是veh[i]所在车道中心线的l坐标(作用是使每个agent都能沿着车道中心线行驶)
-        self.mpc = mpc
+        self.mpc = mpc      # BranchMPC_CVaR对象
         self.predictiveModel = mpc.predictiveModel
         self.backupcons = mpc.predictiveModel.backupcons
 
@@ -161,7 +161,7 @@ class Highway_env():
         else:
             vdes = self.veh_set[1].state[2] + 1*(self.veh_set[1].state[0]+1.5-self.veh_set[0].state[0])
 
-        # 4.根据ego,obs的当前状态,ego的目标状态xRef,求解mpc.并处理求解结果.
+        # 4.根据ego,obs的当前状态,ego的目标状态xRef,调用 BranchMPC_CVaR 的对象 self.mpc 并处理求解结果.
         # Ydes = 1.8+self.veh_set[0].laneidx*3.6
         # vdes = self.veh_set[1].state[2]+5
         xRef = np.array([0,Ydes,vdes,0])

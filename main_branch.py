@@ -27,7 +27,7 @@ def sim_overtake():
     am = 6.0                             # maximum acceleration       
     rm = 0.3                             # maximum steering angle rate
     dt = 0.1
-    NB = 2                               # number of branching, 2 means a tree with 1-m-m^2 branches at each level.(对应论文中分支节点的子节点数)
+    NB = 2                               # number of branching, 2 means a tree with 1-m-m^2 branches at each level.(tree的最大深度,即branch的最大层数,根branch深度为0)
 
     N_lane = 4
 
@@ -45,7 +45,7 @@ def sim_overtake():
     # mpc = robustMPC(mpcParam, model)
     # mpc = BranchMPC(mpcParam, model)
     #定义了有CVaR的目标函数(对应论文中:"IV. BRANCH MPC WITH RISK MEASURE OBJECTIVES")
-    mpc = BranchMPC_CVaR(mpcParam, model, ralpha=0.1)
+    mpc = BranchMPC_CVaR(mpcParam, model, ralpha=0.9)
 
     # 实际运行过程中就只需调用mpc(有CVaR的目标函数)求解即可。(model,mpcParam等只是mpc对象的一部分)
     Highway_env_branch.sim_overtake(mpc,N_lane)

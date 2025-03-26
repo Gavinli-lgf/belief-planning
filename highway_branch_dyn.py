@@ -34,6 +34,7 @@ def dubin(x,u):
     return xdot
 
 
+# s is a parameter that saturates x(对应论文中式子(11))
 def softsat(x,s):
     return (np.exp(s*x)-1)/(np.exp(s*x)+1)*0.5+0.5
 
@@ -168,7 +169,7 @@ Euler forward integration of the dynamics under the policy
     x: 初始状态(x,y,v,ψ);   dyn: 输入(由动态模型函数输出状态导数xdot.)
     N: 预测步数;   ts: 时间步长.
 输出:
-    xs: 预测N步的状态列表 xs.
+    xs: 预测N步的状态列表 xs.(shape(N, n))
 '''
 def propagate_backup(x,dyn,N,ts):
     # 根据状态 x 的类型定义预测的N步的状态列表 xs 的类型
@@ -216,7 +217,7 @@ def lane_bdry_h(x, lb=0, ub=7.2):
 输入: x1 ego的branch(即预测轨迹), x2 obs的branch(即预测轨迹), size([车长+1, 车宽+0.2])
 输出: h (长度为N,记录ego与obs的branch上每一个时间步的碰撞风险值.)
 功能: 对应论文中的"a safety function h, h(x, z) ≥ 0 indicates that the obs satisfies C, otherwise it violates C"
-     再用a softmax function使用指数加权的方式,将碰撞风险量化为一个连续值P(πi|x,z),具体推导见论文.
+     再用a softmax function使用指数加权的方式,将碰撞风险量化为一个连续值h,具体推导见论文.
      (这种软碰撞评估方法能够有效避免硬约束带来的数值不稳定问题，同时为后续的优化和控制提供平滑的输入。)
 """
 def veh_col(x1,x2,size,alpha=1):
@@ -279,7 +280,7 @@ class PredictiveModel():
         self.backupcons = backupcons    # 动作策略(3个:maintain,brake,lc)
         self.calc_xp_expr() # 计算表达式
 
-    # 将非线性系统近似为线性系统.返回A,B,C,xp(下一个状态)
+    # 将非线性系统线性化.返回A,B,C,xp(下一个状态)
     def dyn_linearization(self, x,u):
         #linearizing the dynamics x^+=Ax+Bu+C
         A = self.Asym(x,u)
@@ -289,7 +290,11 @@ class PredictiveModel():
 
         return np.array(A), np.array(B), np.squeeze(np.array(C)), np.squeeze(np.array(xp))
 
-    # 输出2个: ego,obs当前状态分布为x,z时, obs的各分支的概率p; 分支概率对于ego状态的敏感成功(即概率对ego状态的偏导). size都是(m*1)
+    """
+    输入: x,z: ego,obs当前状态
+    输出: p,dp: ego,obs当前状态分别为x,z时, obs的各分支的概率p; 分支概率对于ego状态的敏感程度dp(即概率对ego状态的偏导).
+         size都是(m*1)
+    """
     def branch_eval(self,x,z):
         p = self.psym(x,z)
         dp = self.dpsym(x,z)
@@ -311,12 +316,12 @@ class PredictiveModel():
 
     """
     # 返回值:返回两个值：
-    第一个值是线性化后的碰撞约束值，用于判断当前状态是否安全。
-    第二个值是碰撞检测函数对状态 x 的偏导，用于后续的优化或分析。
+    第一个:h-np.dot(dh,x),线性化后的碰撞约束值。(shape:标量)
+    第二个:dh,safe function h对状态 x 的偏导。shape(1, n)
     """
     def col_eval(self,x,z):
-        dh = np.squeeze(np.array(self.dhsym(x,z)))
-        h = np.squeeze(np.array(self.hsym(x,z)))
+        dh = np.squeeze(np.array(self.dhsym(x,z)))  # shape(1, n)
+        h = np.squeeze(np.array(self.hsym(x,z)))    # shape:标量
         return h-np.dot(dh,x), dh
 
     """
@@ -336,14 +341,17 @@ class PredictiveModel():
             h = MX(x1.shape[0]*2,1)
 
         # h大小为(2*N, 1),前0~N为ego预测轨迹与obs预测轨迹的碰撞结果,后N~2N为ego预测轨迹与道路边界的碰撞结果
-        for i in range(0,x1.shape[0]):
+        for i in range(0, x1.shape[0]):
             # 第i个预测步obs状态x1[i,:]与ego状态x2[i,:]的碰撞结果。(h[i]>0意味着无碰撞)
             h[i] = veh_col(x1[i,:], x2[i,:], [self.cons.L + 2,self.cons.W + 0.2]) 
             # 第i步obs预测状态是否与道路边界是否碰撞。(h>0为无碰撞)
             h[i+x1.shape[0]] = lane_bdry_h(x1[i,:], self.LB[0], self.LB[1])
         return softmin(h,5)
 
-    # 根据每个策略的安全性h,计算每种策略的分支概率p. (返回概率结果的维度与 h 相同size为(m*1))
+    """
+    根据每个策略的安全性h,计算每种策略的分支概率p. (返回概率结果的维度与 h 相同size为(m*1))
+    (对应论文中式子(11))
+    """
     def branch_prob(self,h):
         #branching probablity as a function of the safety function
         h = softsat(h,1)        # softsat 函数对所有策略的安全性数组 h 进行平滑处理，避免概率突变
@@ -361,32 +369,32 @@ class PredictiveModel():
         xp = x + dubin(x,u)*self.dt   # ego 状态预测(状态转移方程)
 
         dyn = lambda x:dubin(x, self.backupcons[0](x))  #计算状态x在策略maintain下的状态导数(即定义maintain下的动态模型函数)
-        x1 = propagate_backup(x, dyn, self.N, self.dt)  # ego 在 maintain 策略下的N步预测轨迹(时间步长ts).
+        x1 = propagate_backup(x, dyn, self.N, self.dt)  # ego 在 maintain 策略下的N步预测轨迹(时间步长ts).(shape(N, n))
         # x2:obs 在self.m个策略下的子branch。 x2是2维的,第1维size为self.N是单个branch步数,第2维size为self.m*self.n,每间隔n列记录一个策略的子branch,因此共n*m列。
-        x2 = SX(self.N, self.n*self.m)
+        x2 = SX(self.N, self.n*self.m)  # (shape(N, m*n))
         for i in range(0, self.m):  # 遍历每个策略
             dyn = lambda x:dubin(x, self.backupcons[i](x))   # 第i个策略下的动态模型函数
             x2[:, i*self.n:(i+1)*self.n] = propagate_backup(z, dyn, self.N, self.dt)    # obs在第i个策略下的预测轨迹记录在x2的第(i*n ~ i*(n+1))列中
         # hi 是每个策略的安全性: obs 在m个策略下的预测轨迹 x2 与 ego 的预测轨迹 x1 之间的碰撞结果; 以及 obs 与 road 边界的碰撞结果。
-        hi = SX(self.m,1)   # hi大小为(m*1), 每一行对应obs在该策略的碰撞结果。
-        for i in range(0,self.m):
+        hi = SX(self.m,1)   # shape(m, 1), 每一行对应obs在该策略的碰撞结果(safe function)。
+        for i in range(0, self.m):
             # 如果h[i]>0,则表示obs在第i个策略下的预测轨迹安全无碰撞。
             hi[i] = self.BF_traj(x2[:, self.n*i:self.n*(i+1)], x1)
-        p = self.branch_prob(hi)    # 根据每个策略的安全性h,计算每种策略的分支概率p(size为(m*1))
+        p = self.branch_prob(hi)    # 根据每个策略的安全性h,计算每种策略的分支概率p(shape(m, 1))
 
         # 计算 ego(x) 与 obs(z) 的碰撞安全值 h(h>0意味着无碰撞)
-        h = veh_col(x.T, z.T, [self.cons.L+1, self.cons.W+0.2], 1)
+        h = veh_col(x.T, z.T, [self.cons.L+1, self.cons.W+0.2], 1)  # shape:标量
 
         # Function() 是 CasADi 库函数,用于定义符号函数.基本语法: Function(name, inputs, outputs)
         self.xpsym = Function('xp',[x,u],[xp])      # 系统状态转移方程，输入x,u,输出下一个状态xp
         self.Asym = Function('A',[x,u],[jacobian(xp,x)])    # 求状态转移方程的A矩阵
         self.Bsym = Function('B',[x,u],[jacobian(xp,u)])    # 求状态转移方程的B矩阵
-        self.dhsym = Function('dh',[x,z],[jacobian(h,x)])   # ego与obs当前状态的碰撞检测h对x的偏导
-        self.hsym = Function('h',[x,z],[h])     # ego与obs当前状态的碰撞检测函数
+        self.dhsym = Function('dh',[x,z],[jacobian(h,x)])   # ego与obs当前状态的碰撞检测h对x的偏导(shape(1, 4))
+        self.hsym = Function('h',[x,z],[h])     # ego与obs当前状态的碰撞检测函数(shape:标量)
         self.zpred = Function('zpred',[z],[x2]) # 输入obs的状态z,输出obs在m个策略下的所有子branch:x2.(用于生成scenario tree)
         self.xpred = Function('xpred',[x],[x1]) # ego 在 maintain 策略下的预测函数
-        self.psym = Function('p',[x,z],[p])     # obs 分支概率函数(输入ego状态x和obs状态z，输出obs不同策略的分支概率p,size为(m*1))
-        self.dpsym = Function('dp',[x,z],[jacobian(p,x)])       # obs 分支概率对ego状态x的偏导函数
+        self.psym = Function('p',[x,z],[p])     # obs 分支概率函数(输入ego状态x和obs状态z，输出obs不同策略的分支概率p,size为(m, 1))
+        self.dpsym = Function('dp',[x,z],[jacobian(p,x)])       # obs 分支概率对ego状态x的偏导函数(shape(m, n))
         self.u0sym = Function('u0',[x],[self.backupcons[0](x)]) # 根据状态x获取maintain策略下的控制输入u0
 
 class PredictiveModel_merge():
