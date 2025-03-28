@@ -1917,7 +1917,7 @@ class BranchMPC_CVaR():
         addSlack[0:nc_x, 0:nc_x] = -np.eye(nc_x)
         # Now constraint slacks >= 0
         I = - np.eye(nc_x); Zeros = np.zeros((nc_x, F_hard.shape[1]))
-        Positivity = np.hstack((Zeros, I,np.zeros([nc_x,1])))
+        Positivity = np.hstack((Zeros, I, np.zeros([nc_x,1])))
         Fl = np.vstack(( np.hstack((F_hard, addSlack)) , Positivity))
         bl = np.hstack((bxtot, butot, np.zeros(Frisk.shape[0]+nc_x)))
 
@@ -1928,10 +1928,10 @@ class BranchMPC_CVaR():
         bq = np.empty(0)
         dims = {'q':[]}
         if self.S is None:
-            W1 = self.Wx
+            W1 = self.Wx    # self.Wx 是对状态权重 Q 的 Cholesky 分解,用于SOCP中的锥约束
         else:
             W1 = self.Wx@self.S
-        Jcons = np.dot(np.dot(self.xRef,self.Q),self.xRef)
+        Jcons = np.dot(np.dot(self.xRef,self.Q),self.xRef)  # 原QP中的: xRef'*Q*xRef
         for branch in self.branchidx:
             idx = self.branchidx[branch]
             for i in range(0,self.m):
@@ -1988,7 +1988,7 @@ class BranchMPC_CVaR():
     def updateIneqConstr(self):
         Nc = self.Fx.shape[0]+1
         if self.S is None:
-            W1 = self.Wx
+            W1 = self.Wx        # self.Wx 是对状态权重 Q 的 Cholesky 分解,用于SOCP中的锥约束
         else:
             W1 = self.Wx@self.S
         Jcons = np.dot(np.dot(self.xRef,self.Q),self.xRef)
