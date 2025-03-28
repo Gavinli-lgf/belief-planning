@@ -1746,7 +1746,9 @@ class BranchMPC_CVaR():
         self.slackweight = np.zeros(self.totalx*(self.Fx.shape[0]+1)) 
         self.branchdim = countbranch
 
-    # 构建等式约束
+    """
+    构建等式约束.对应论文式(10),包括3部分:1.branch内的状态转移;2.branch与子branch之间的状态转移;3.风险度量的等式约束.
+    """
     def buildEqConstr(self):
         # Buil matrices for optimization (Convention from Chapter 15.2 Borrelli, Bemporad and Morari MPC book)
         # The equality constraint is: G*z = E * x(t) + L
@@ -1760,21 +1762,24 @@ class BranchMPC_CVaR():
 
 
         totalxdim = self.totalx*self.n
+        # 构建tree中所有点的状态转移方程的等式约束(包括branch内部,branch与子branch之间.tree的初始点b0不用,因此A,B,C都是从序号为(n,0)的子矩阵开始赋值。)
         for branch in self.ndx:
             l = branch.xtraj.shape[0]
-            ndx = self.ndx[branch]
+            ndx = self.ndx[branch]      # branch上节点在整个tree中所有节点中的起始索引
             ndu = self.ndu[branch]
+            # branch内的状态转移:从branch序号为1的点到最后一个点(序号从0开始),
             for t in range(1,l):
                 A,B,C = branch.dynmatr[t-1]
-                Gx[(ndx+t)*self.n:(ndx+t+1)*self.n,(ndx+t-1)*self.n:(ndx+t)*self.n] = -A
-                Gu[(ndx+t)*self.n:(ndx+t+1)*self.n,(ndu+t-1)*self.d:(ndu+t)*self.d] = -B
+                Gx[(ndx+t)*self.n:(ndx+t+1)*self.n, (ndx+t-1)*self.n:(ndx+t)*self.n] = -A
+                Gu[(ndx+t)*self.n:(ndx+t+1)*self.n, (ndu+t-1)*self.d:(ndu+t)*self.d] = -B
                 L[(ndx+t)*self.n:(ndx+t+1)*self.n]                                  = C
+            # branch与子branch之间的状态转移
             A,B,C = branch.dynmatr[-1]
             if branch.depth<self.NB:
                 for child in branch.children:
                     ndxc = self.ndx[child]
-                    Gx[ndxc*self.n:(ndxc+1)*self.n,(ndx+l-1)*self.n:(ndx+l)*self.n] = -A
-                    Gu[ndxc*self.n:(ndxc+1)*self.n,(ndu+l-1)*self.d:(ndu+l)*self.d] = -B
+                    Gx[ndxc*self.n:(ndxc+1)*self.n, (ndx+l-1)*self.n:(ndx+l)*self.n] = -A
+                    Gu[ndxc*self.n:(ndxc+1)*self.n, (ndu+l-1)*self.d:(ndu+l)*self.d] = -B
                     L[ndxc*self.n:(ndxc+1)*self.n]                                  = C
             else:
                 Gx[(ndx+l)*self.n:(ndx+l+1)*self.n,(ndx+l-1)*self.n:(ndx+l)*self.n] = -A
@@ -1782,14 +1787,14 @@ class BranchMPC_CVaR():
                 L[(ndx+l)*self.n:(ndx+l+1)*self.n]                                  = C
 
 
-        ## dual formulation of CVaR opt
-        # rho(i)=-s(i)+1/alpha*dot(mum(i,:),P(i,:))
+        ## dual formulation of CVaR opt(对应论文式(10b),推导在附录中)
+        # rho(i)=-s(i)+1/alpha*dot(mum(i,:),P(i,:)), (其中rho(i),s(i),alpha,mum(i,:)分别对应论文γi,σi,α,μi−)
         Arisk = np.zeros([self.branchdim, self.branchdim*(self.m*2+2)])
         for branch in self.branchidx:
             idx = self.branchidx[branch]
-            Arisk[idx,idx] = 1
-            Arisk[idx,self.branchdim+idx] = 1
-            Arisk[idx,self.branchdim*(self.m+2)+idx*self.m:self.branchdim*(self.m+2)+(idx+1)*self.m]=-branch.p/self.ralpha
+            Arisk[idx, idx] = 1
+            Arisk[idx, self.branchdim+idx] = 1
+            Arisk[idx, self.branchdim*(self.m+2)+idx*self.m:self.branchdim*(self.m+2)+(idx+1)*self.m]=-branch.p/self.ralpha
         self.G = linalg.block_diag(np.hstack((Gx,Gu)),Arisk)
         self.E = np.vstack((E,np.zeros((Arisk.shape[0],self.n))))
         self.L = np.append(L,np.zeros(Arisk.shape[0]))
@@ -1855,7 +1860,7 @@ class BranchMPC_CVaR():
 
     """
     构建不等式约束矩阵 F 和对应的约束向量 b:
-    1. 构建tree上所有节点状态x的Ineq约束: 1.Fxtot * x_tot <= bxtot(如果有S,就要考虑在Fxtot中); 2. self.slackweight
+    1. 构建tree上所有节点状态x的Ineq约束: (1)Fxtot * x_tot <= bxtot(如果有S,就要考虑在Fxtot中); (2)self.slackweight
     2. 构建tree上所有节点输入u的Ineq约束: Futot * u_tot <= butot
     3. 构建tree上所有branch与 CVaR 目标相关的不等式约束
     4. build inequality for CVaR opt(构建 CVaR 优化的不等式约束)
@@ -1924,7 +1929,7 @@ class BranchMPC_CVaR():
         # build inequality for CVaR opt(构建 CVaR 优化的不等式约束)
         #xQx+uRu<=-sigma-mup+mum-rho_child
 
-        Fq = np.empty((0,offset+bdim*(self.m*2+2)+nslack+1))
+        Fq = np.empty((0, offset+bdim*(self.m*2+2)+nslack+1))
         bq = np.empty(0)
         dims = {'q':[]}
         if self.S is None:
@@ -1956,12 +1961,12 @@ class BranchMPC_CVaR():
                     F2[nx*self.n+j*self.d:nx*self.n+(j+1)*self.d,self.totalx*self.n+(ndu+j)*self.d:self.totalx*self.n+(ndu+j+1)*self.d] = -2*self.Wu
                 F3 = -F1.copy()
                 Fqi = np.vstack((F1,F2,F3))
-                bqi = np.hstack((1-Jcons*nx,np.zeros(F2.shape[0]),1+Jcons*nx))
+                bqi = np.hstack((1-Jcons*nx, np.zeros(F2.shape[0]), 1+Jcons*nx))
                 Fq = np.vstack((Fq,Fqi))
                 bq = np.append(bq,bqi)
                 dims['q'].append(bqi.shape[0])
 
-        # add the last socp constraint regarding the total cost: J>=\rho_0+u_0^T R u_0(添加与总成本相关的 SOCP 约束)
+        # add the last socp constraint regarding the total cost: J>=\rho_0+u_0^T R u_0(对应论文式(10b))
         F1 = np.zeros(offset+bdim*(self.m*2+2)+nslack+1)
         idx = self.branchidx[self.BT]
         F1[-1] = -1
